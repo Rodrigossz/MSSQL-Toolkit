@@ -1,0 +1,39 @@
+begin   set nocount on 
+ if exists (select 1  from tempdb..sysobjects  where [Id] = object_id('tempdb..#dbfileinfo'))  begin  drop table #dbfileinfo  end 
+ if exists (select 1  from tempdb..sysobjects  where [Id] = object_id('tempdb..#logsizestats'))  begin  drop table #logsizestats  end 
+ if exists (select 1  from tempdb..sysobjects  where [Id] = object_id('tempdb..#datafilestats'))  begin  drop table #datafilestats  end 
+ if exists (select 1  from tempdb..sysobjects  where [Id] = object_id('tempdb..#fixeddrives'))  begin  drop table #fixeddrives  end 
+ if exists (select 1  from tempdb..sysobjects  where [Id] = object_id('tempdb..#usados'))  begin  drop table #usados  end 
+ create table #fixeddrives  (  DriveLetter varchar(10),  MB_Free dec(20, 2)  ) 
+ create table #datafilestats  (  DBName varchar(255),  DBId int,  FileId tinyint,  [FileGroup] tinyint,  TotalExtents dec(20, 2),  UsedExtents dec(20, 2),  [Name] varchar(255),  [FileName] varchar(400)  ) 
+ create table #logsizestats   (  DBName varchar(255) not null primary key clustered,   DBId int,  LogFile real,   LogFileUsed real,   Status bit  )  create table #dbfileinfo  (  [ServerName] varchar(255),  [DBName] varchar(65),  [LogicalFileName] varchar(400),  [UsageType] varchar (30),  [Size_MB] dec(20, 2),  [SpaceUsed_MB] dec(20, 2),  [MaxSize_MB] dec(20, 2),  [NextAllocation_MB] dec(20, 2),  [GrowthType] varchar(65),  [FileId] smallint,  [GroupId] smallint,  [PhysicalFileName] varchar(400),  [DateChecked] datetime  ) 
+ declare @SQLString varchar(3000)  declare @MinId int  declare @MaxId int  declare @DBName varchar(255)  declare @tblDBName table (  RowId int identity(1, 1),  DBName varchar(255),  DBId int) 
+ insert into @tblDBName  (DBName,  DBId)  select [Name],  DBId  from master..sysdatabases  where ( Status & 512 ) = 0  order by [Name] 
+ insert into #logsizestats  (DBName,  LogFile,  LogFileUsed,  Status)  exec ('dbcc sqlperf(logspace) with no_infomsgs') 
+ update #logsizestats  set DBId = db_id(DBName) 
+ insert into #fixeddrives  exec master..xp_fixeddrives 
+ select @MinId = min(RowId),  @MaxId = max(RowId)  from @tblDBName 
+ while ( @MinId <= @MaxId )  begin  select @DBName = [DBName]  from @tblDBName  where RowId = @MinId 
+ select @SQLString = 'SELECT ServerName = @@SERVERNAME,' +  ' DBName = ''' +  @DBName +  ''',' +  ' LogicalFileName = [name],' + ' UsageType = CASE WHEN (64&[status])=64 THEN ''Log'' ELSE ''Data'' END,' +  ' Size_MB = [size]*8/1024.00,' +  ' SpaceUsed_MB = NULL,' + 
+' MaxSize_MB = CASE [maxsize] WHEN -1 THEN -1 WHEN 0 THEN [size]*8/1024.00 ELSE maxsize/1024.00*8 END,'+ 
+' NextExtent_MB = CASE WHEN (1048576&[status])=1048576 THEN ([growth]/100.00)*([size]*8/1024.00) WHEN [growth]=0 THEN 0 ELSE [growth]*8/1024.00 END,'+ ' GrowthType = CASE WHEN (1048576&[status])=1048576 THEN ''%'' ELSE ''Pages'' END,'+ ' FileId = [fileid],' + ' GroupId = [groupid],' +  ' PhysicalFileName= [filename],' +  ' CurTimeStamp = GETDATE()' + 
+'FROM [' + @DBName + ']..sysfiles' 
+ print @SQLString 
+ insert into #dbfileinfo  exec (@SQLString) 
+ update #dbfileinfo   set SpaceUsed_MB = Size_MB / 100.0 * (select LogFileUsed  from #logsizestats  where DBName = @DBName)   where UsageType = 'Log'  and DBName = @DBName 
+  select @SQLString = 'USE [' + @DBName +  '] DBCC SHOWFILESTATS WITH NO_INFOMSGS' 
+  insert #datafilestats  (FileId,  [FileGroup],  TotalExtents,  UsedExtents,  [Name],  [FileName])  execute(@SQLString) 
+ update #dbfileinfo  set [SpaceUsed_MB] = S.[UsedExtents] * 64 / 1024.00  from #dbfileinfo as F  inner join #datafilestats as S  on F.[FileId] = S.[FileId]  and F.[GroupId] = S.[FileGroup]  and F.[DBName] = @DBName 
+ truncate table #datafilestats 
+ select @MinId = @MinId + 1 end 
+ select @@servername as servidor,  substring(A.PhysicalFileName, 1, 1) as unidad,  sum ([Size_MB]) as SqlTotalDB,  sum([SpaceUsed_MB]) as SqlTotalUsedSpaceDB,  sum (( [Size_MB] ) - ( [SpaceUsed_MB] ))as SQLTotalFreeSpaceDB  into #usados  from #dbfileinfo as A  left join #fixeddrives as B  on substring(A.PhysicalFileName, 1, 1) = B.DriveLetter   group by substring(A.PhysicalFileName, 1, 1) 
+  select servidor,  DriveLetter,  MB_Free as  RealMb_free,  MB_Free + SQLTotalFreeSpaceDB as  MB_FreeNeto,  SqlTotalDB,  abs(( SqlTotalDB - SQLTotalFreeSpaceDB )) as  SQLTotalUsedSpaceDB,  SQLTotalFreeSpaceDB, ( 100 * abs(( SqlTotalDB - SQLTotalFreeSpaceDB )) ) / SqlTotalDB as  Porcentaje_Uso_DB 
+ from #fixeddrives as f  inner join #usados as z  on z.unidad = f.DriveLetter 
+  if exists (select 1  from tempdb..sysobjects  where [Id] = object_id('tempdb..#dbfileinfo'))  begin  drop table #dbfileinfo  end 
+ if exists (select 1  from tempdb..sysobjects  where [Id] = object_id('tempdb..#logsizestats'))  begin  drop table #logsizestats  end 
+ if exists (select 1  from tempdb..sysobjects  where [Id] = object_id('tempdb..#datafilestats'))  begin  drop table #datafilestats  end 
+ if exists (select 1  from tempdb..sysobjects  where [Id] = object_id('tempdb..#fixeddrives'))  begin  drop table #fixeddrives  end 
+ if exists (select 1  from tempdb..sysobjects  where [Id] = object_id('tempdb..#usados'))  begin  drop table #usados  end 
+  set nocount off 
+end 
+

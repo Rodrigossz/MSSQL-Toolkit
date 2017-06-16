@@ -1,0 +1,15 @@
+SELECT
+    SCHEMA_NAME(o.schema_id) + '.' + OBJECT_NAME(p.object_id) AS NAME,
+    SUM(reserved_page_count) * 8 AS total_space_used_kb,
+    SUM(CASE WHEN index_id < 2 THEN reserved_page_count ELSE 0 END ) * 8 AS table_space_used_kb,
+    SUM(CASE WHEN index_id > 1 THEN reserved_page_count ELSE 0 END ) * 8 AS nonclustered_index_spaced_used_kb,
+    MAX(row_count) AS row_count
+FROM    
+    sys.dm_db_partition_stats AS p
+		INNER JOIN sys.all_objects AS o ON p.object_id = o.object_id
+WHERE
+	o.is_ms_shipped = 0
+GROUP BY
+    SCHEMA_NAME(o.schema_id) + '.' + OBJECT_NAME(p.object_id)
+ORDER BY
+	NAME

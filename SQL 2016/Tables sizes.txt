@@ -1,0 +1,21 @@
+Declare @v_TableName Varchar(100)
+Declare @v_Table Table (Table_Name Varchar(100))
+Declare @v_TableSize Table (
+Table_Name Varchar(100),
+rows BigInt,
+Reserved Varchar(50),
+ActualDataSize Varchar(50),
+IndexSize Varchar(50),
+Unused Varchar(50)
+)
+Insert Into @v_Table
+Select Table_Name From Information_Schema.Tables Where Table_Type = 'BASE TABLE'
+Select @v_TableName = Table_Name From @v_Table
+While Exists (Select 1 From @v_Table)
+Begin
+Insert Into @v_TableSize exec sp_spaceused @v_TableName
+Delete From @v_Table Where Table_Name = @v_TableName
+Select @v_TableName= Table_Name From @v_Table
+End
+Select * From @v_TableSize Order By rows Desc
+Go

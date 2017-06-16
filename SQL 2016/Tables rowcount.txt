@@ -1,0 +1,16 @@
+SELECT t.name [TableName], SUM(st.row_count)[RowCount]
+
+FROM sys.tables t
+
+JOIN sys.schemas s ON t.schema_id = s.schema_id
+
+JOIN sys.indexes i ON t.object_id = i.object_id
+
+JOIN sys.dm_db_partition_stats st ON t.object_id = st.object_id AND i.index_id = st.index_id
+
+WHERE i.index_id < 2 
+
+-- Heaps and Clustered IndexesGROUPBY s.name, t.name
+GROUP BY t.name
+
+ORDER BY  t.name;

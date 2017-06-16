@@ -1,0 +1,53 @@
+--create table DatabasesLS (nome sysname primary key)
+--insert DatabasesLS select name from master..sysdatabases where dbid > 4
+--
+--select * from SQL_Monitoring..DbLSDelayEmail
+--Create table DbLSDelayEmail (Name sysname, LastRestore datetime)
+
+SET nocount ON
+
+DECLARE @Subject VARCHAR (100)
+SET @Subject='SQL02 - Log Shipping Possible Issues on ' + @@ServerName
+
+--clean up sp_who
+Truncate table SQL_Monitoring..DbLSDelayEmail
+
+--run SP_Who
+Insert into SQL_Monitoring..DbLSDelayEmail
+ select destination_database_name,MAX(restore_date) from msdb..restorehistory 
+ where destination_database_name in (select nome from SQL_Monitoring..DatabasesLS)
+ group by destination_database_name
+ having DATEDIFF(hh,max(restore_date),GETDATE()) > 2
+ 
+--Reports
+
+DECLARE @tableHTML NVARCHAR(MAX) ;
+SET @tableHTML =
+N'<strong><font color="red">Which Dbs Without Restore in the Last Hours</font></strong> <br>
+<table border="1">' +
+N'<tr>' +
+N'<th>Db Name</th>' +
+N'<th>Last Restore</th>' +
+N'</tr>' +
+CAST ( (SELECT td=Name,''
+,td= LastRestore,''
+FROM SQL_Monitoring..DbLSDelayEmail
+FOR XML PATH('tr'), TYPE
+) AS NVARCHAR(MAX) ) +
+N'</table>
+<br><br>
+<strong><font color="red">All LS Jobs Should Be Checked</font></strong> <br>'
+
+
+declare @body2 varchar(max)
+if @tableHTML is not null
+set @body2 = @tableHTML 
+else 
+set @body2 = 'ALL OK, NO DELAYs > 2 hs !!!'
+
+EXEC msdb.dbo.sp_send_dbmail
+@profile_name = 'SMTP - MTO-BD02',
+@recipients = 'dba@minutoseguros.com.br',
+@subject = @Subject,
+@body = @body2,
+@body_format = 'HTML' ;

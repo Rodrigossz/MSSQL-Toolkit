@@ -1,0 +1,270 @@
+/*
+server_config_script_2005/2008/2008R2.sql
+Here's a quick query you can run across all your servers (2005/2008/2008R2)
+ to find a wealth of information like service pack, edition, number of CPUs and RAM.
+  Even more is available if you want to add additional SERVERPROPERTY attributes or
+   fields from one of the DMVs.
+*/
+SELECT SERVERPROPERTY('MachineName') AS [MACHINE NAME],
+	SERVERPROPERTY('InstanceName') AS [SQL SERVICE NAME],
+	SERVERPROPERTY('ServerName') AS [INSTANCE NAME],
+	SERVERPROPERTY('ProductVersion') AS [VersionBuild],
+	SERVERPROPERTY('ProductLevel') AS [Current SP],
+	SERVERPROPERTY ('Edition') AS [Edition 32 or 64 BIT],
+	SERVERPROPERTY('IsIntegratedSecurityOnly') AS [IsWindowsAuthOnly],
+	SERVERPROPERTY('IsClustered') AS [IsClustered],
+	(cpu_count/hyperthread_ratio) as [physical CPUs],  [cpu_count] AS [CPU CORES], hyperthread_ratio,
+	(([physical_memory_in_bytes]/1073741824) +1) AS [RAM (GB)],                -- This column exists in sql server 2005 - 2008r2
+
+	 OSVersion =RIGHT(@@version, LEN(@@version)- 3 -charindex (' ON ', @@VERSION))
+FROM [sys].[dm_os_sys_info] with (nolock)
+
+
+--SECTION NEXT : Get all drive space info on server
+-- Enable the OLE automation on the server
+
+EXEC sp_configure 'allow updates', 0
+--GO
+RECONFIGURE WITH OVERRIDE;
+--GO
+EXEC sp_configure 'show advanced options', 1;
+--GO
+RECONFIGURE WITH OVERRIDE;
+--GO
+EXEC sp_configure 'Ole Automation Procedures', 1;
+--GO
+RECONFIGURE WITH OVERRIDE;
+--GO
+
+
+
+-- Run the below script to get db file space info
+
+SET NOCOUNT ON
+
+DECLARE @dbName nvarchar(100)
+DECLARE @sqlstmt nvarchar(4000)
+DECLARE @dbContext nvarchar(256)
+DECLARE  @rowcnt INT
+DECLARE  @iterator INT,
+@sortby varchar(20) = 'drive'
+
+DECLARE DBcursor CURSOR  FOR
+SELECT name
+FROM   MASTER.dbo.sysdatabases
+
+
+CREATE TABLE #db_file_info (
+  [Drive Letter]  CHAR(01) NULL,
+  [Database Name]    SYSNAME    NULL,
+  [File Type]        VARCHAR(10)    NULL,
+  [Logical File Name] SYSNAME    NULL,
+  [Physical Name]        VARCHAR(500)    NULL,
+  [File Size (MB)]  FLOAT  NULL,
+  [File Size (GB)]  FLOAT  NULL,
+  [Space Used (MB)] INT    NULL,
+  [Space Used (GB)] FLOAT  NULL,
+  [Space Left (MB)] FLOAT  NULL,
+  [Space Left (GB)] FLOAT  NULL,
+  [Percent Free Space] FLOAT  NULL,
+  [Max File Size (MB)] FLOAT NULL,
+  [Max File Size (GB)] FLOAT NULL,
+  [Autogrowth (MB)] FLOAT NULL,
+  [File ID]          SMALLINT    NULL,
+  [DB State]        VARCHAR(10)    NULL,
+  [Shrink File (Truncate free space)] VARCHAR(200) NULL,
+  [Shrink file To 20percent freespace] VARCHAR(200) NULL,
+  [Increase File Size by 20percent] VARCHAR(200) NULL
+ )
+
+
+OPEN DBcursor
+FETCH DBcursor INTO @dbName
+
+WHILE (@@FETCH_STATUS = 0)
+  BEGIN
+
+    SET @dbContext = '[' + @dbName + ']' + '.dbo.' + 'sp_executesql'
+    SET @sqlstmt = ' Insert into #db_file_info
+		             SELECT LEFT(physical_name,1) AS drive_letter
+					, db_name()
+					, CASE 
+						WHEN RIGHT(physical_name,4) = ''.mdf'' THEN ''mdf''
+						WHEN RIGHT(physical_name,4) = ''.ndf'' THEN ''ndf''
+						WHEN RIGHT(physical_name,4) = ''.ldf'' THEN ''ldf''
+						ELSE type_desc
+						END as ''File Type''
+					, name
+					, physical_name
+					, ROUND( (((CAST([size] as FLOAT) * 8192) /1024) /1024), 2) as [File Size MB]
+					, ROUND( ((((CAST([size] as FLOAT) * 8192) /1024) /1024) /1024), 2) as [File Size GB]
+					, ROUND( (((CAST(fileproperty(name,''SpaceUsed'') as FLOAT) * 8192) /1024) /1024), 2) as [Space Used MB]
+					, ROUND( ((((CAST(fileproperty(name,''SpaceUsed'') as FLOAT) * 8192) /1024) /1024) /1024), 2) as [Space Used GB]
+					, ROUND( (((CAST((size-fileproperty(name,''SpaceUsed'')) as FLOAT) * 8192) /1024) /1024), 2) as [Space Left MB]
+					, ROUND( ((((CAST((size-fileproperty(name,''SpaceUsed'')) as FLOAT) * 8192) /1024) /1024) /1024), 2) as [Space Left GB]
+					, ROUND(
+						ROUND( (((CAST((size-fileproperty(name,''SpaceUsed'')) as FLOAT) * 8192) /1024) /1024), 2)   / 
+						ROUND( (((CAST([size] as FLOAT) * 8192) /1024) /1024), 2)   
+						*   100
+						, 2) as [percent free space]
+
+					, CASE [max_size] 
+						WHEN -1 THEN 0
+						ELSE ROUND( (((CAST([max_size] as FLOAT) * 8192) /1024) /1024), 2)
+					 END as [Max File Size (MB)]
+					, CASE [max_size] 
+						WHEN -1 THEN 0
+						ELSE ROUND( ((((CAST([max_size] as FLOAT) * 8192) /1024) /1024) /1024), 2)
+					 END as [Max File Size (GB)]
+					, ROUND( (((CAST(growth as FLOAT) * 8192) /1024) /1024), 2) as [Autogrowth (MB)]
+					, file_id 
+					, state_desc as [DB State]
+					, ''USE ['' + DB_NAME() + '']; DBCC SHRINKFILE (N'''''' + name + '''''' , 0, TRUNCATEONLY);'' as [Shrink_FileSize_command]
+					, ''USE ['' + DB_NAME() + '']; DBCC SHRINKFILE (N'''''' + name + '''''' , ''
+						+ CAST( ROUND ( 1.2*(ROUND( (((CAST(fileproperty(name,''SpaceUsed'') as FLOAT) * 8192) /1024) /1024), 2)),0) AS VARCHAR(20))
+						+ '');'' as [Shrink_FileSize_command]
+					, ''USE [MASTER]; ALTER DATABASE ['' + DB_NAME() + ''] MODIFY FILE (NAME = '' + name + '', SIZE = '' 
+						+ CAST( ROUND( 1.2*(ROUND( (((CAST(fileproperty(name,''SpaceUsed'') as FLOAT) * 8192) /1024) /1024), 2)), 0) AS VARCHAR(20))
+						+ ''MB)'' as [Increase_FileSize_by20]
+					
+			FROM  sys.database_files
+	'
+	
+	--PRINT @sqlstmt
+    EXEC @dbContext @sqlstmt
+    FETCH  DBcursor INTO @dbName
+ END
+
+CLOSE DBcursor
+DEALLOCATE DBcursor
+
+
+SET @sqlstmt = 'SELECT * FROM #db_file_info '
+IF @sortby = 'drive'
+	SET @sqlstmt = @sqlstmt + 'ORDER BY [Drive Letter], [Database Name]'
+ELSE IF @sortby = 'db'
+	SET @sqlstmt = @sqlstmt + 'ORDER BY [Database Name], [Percent Free Space]'
+ELSE IF @sortby = 'freespace'
+	SET @sqlstmt = @sqlstmt + 'ORDER BY [Percent Free Space], [Database Name]'
+
+EXEC (@sqlstmt)
+
+DROP TABLE #db_file_info
+
+
+-- Run the below script to get TOTAL space, free space, used space in MBs
+
+
+
+SET NOCOUNT ON
+
+
+IF EXISTS (SELECT name FROM tempdb..sysobjects WHERE name = '##_DriveSpace')
+	DROP TABLE ##_DriveSpace
+
+IF EXISTS (SELECT name FROM tempdb..sysobjects WHERE name = '##_DriveInfo')
+	DROP TABLE ##_DriveInfo
+
+
+DECLARE @Result INT
+	, @objFSO INT
+	, @Drv INT 
+	, @cDrive VARCHAR(13) 
+	, @Size VARCHAR(50) 
+	, @Free VARCHAR(50)
+	, @Volume_Label varchar(50)
+
+CREATE TABLE ##_DriveSpace  
+	(
+	 DriveLetter CHAR(1) not null
+	, FreeSpace VARCHAR(10) not null
+
+	)
+
+CREATE TABLE ##_DriveInfo
+	(
+	DriveLetter CHAR(1)
+	, TotalSpace bigint
+	, FreeSpace bigint
+	, Volume_Label varchar(50)
+	)
+
+INSERT INTO ##_DriveSpace 
+	EXEC master.dbo.xp_fixeddrives
+
+
+-- Iterate through drive letters.
+DECLARE  curDriveLetters CURSOR
+	FOR SELECT driveletter FROM ##_DriveSpace
+
+DECLARE @DriveLetter char(1)
+	OPEN curDriveLetters
+
+FETCH NEXT FROM curDriveLetters INTO @DriveLetter
+WHILE (@@fetch_status <> -1)
+BEGIN
+	IF (@@fetch_status <> -2)
+	BEGIN
+
+		SET @cDrive = 'GetDrive("' + @DriveLetter + '")' 
+
+			EXEC @Result = sp_OACreate 'Scripting.FileSystemObject', @objFSO OUTPUT 
+
+				IF @Result = 0  
+
+					EXEC @Result = sp_OAMethod @objFSO, @cDrive, @Drv OUTPUT 
+
+				IF @Result = 0  
+
+					EXEC @Result = sp_OAGetProperty @Drv,'TotalSize', @Size OUTPUT 
+
+				IF @Result = 0  
+
+					EXEC @Result = sp_OAGetProperty @Drv,'FreeSpace', @Free OUTPUT 
+
+				IF @Result = 0  
+
+					EXEC @Result = sp_OAGetProperty @Drv,'VolumeName', @Volume_Label OUTPUT 
+
+				IF @Result <> 0  
+ 
+					EXEC sp_OADestroy @Drv 
+					EXEC sp_OADestroy @objFSO 
+
+			SET @Size = (CONVERT(BIGINT,@Size) / 1048576 )
+
+			SET @Free = (CONVERT(BIGINT,@Free) / 1048576 )
+
+			INSERT INTO ##_DriveInfo
+				VALUES (@DriveLetter, @Size, @Free, @Volume_Label)
+
+	END
+	FETCH NEXT FROM curDriveLetters INTO @DriveLetter
+END
+
+CLOSE curDriveLetters
+DEALLOCATE curDriveLetters
+
+PRINT 'Drive information for server ' + @@SERVERNAME + '.'
+PRINT ''
+
+-- Produce report.
+SELECT DriveLetter
+	, Volume_Label
+	, CAST(FreeSpace AS varchar(15)) as [FreeSpace MB]
+	, CAST( ROUND( cast(FreeSpace as FLOAT) / cast(1024 as FLOAT), 2) AS VARCHAR(15)) AS [FreeSpace GB]  
+	, CAST((TotalSpace - FreeSpace) AS varchar(15)) AS [UsedSpace MB]
+	, CAST( ROUND( cast((TotalSpace - FreeSpace) as FLOAT) / cast(1024 as FLOAT), 2) AS VARCHAR(15)) AS [UsedSpace GB]
+	, CAST(TotalSpace AS varchar(15)) AS [TotalSpace MB]
+	, CAST( ROUND( cast(TotalSpace as FLOAT) / cast(1024 as FLOAT), 2) AS VARCHAR(15)) AS [TotalSpace GB]
+	, ((CONVERT(NUMERIC(9,0),FreeSpace) / CONVERT(NUMERIC(9,0),TotalSpace)) * 100) AS [Percentage Free]
+INTO ##_DriveInfo2
+FROM ##_DriveInfo
+--WHERE ((CONVERT(NUMERIC(9,0),FreeSpace) / CONVERT(NUMERIC(9,0),TotalSpace)) * 100) >=20
+ORDER BY [DriveLetter] ASC	
+
+SELECT *
+FROM ##_DriveInfo2
+ORDER BY [DriveLetter] ASC	
+
+DROP TABLE ##_DriveInfo2

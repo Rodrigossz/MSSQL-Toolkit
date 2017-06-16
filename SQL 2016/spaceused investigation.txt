@@ -1,0 +1,65 @@
+--create table #temp (name sysname,rows int, reserved varchar(20), data varchar(20), index_size varchar(20), unused varchar(20))
+--insert #temp
+--exec sp_msforeachtable 'exec sp_spaceused "?"'
+
+
+select top 10
+name, rows,
+convert(int,replace (reserved,' KB',''))/1024 as reserved_MB ,
+convert(int,replace (data,' KB',''))/1024 as data_MB,
+convert(int,replace (index_size,' KB',''))/1024 as index_size_MB, 
+convert(int,replace (unused,' KB',''))/1024 as unused_MB,
+convert(int,replace (reserved,' KB',''))/1024 +
+convert(int,replace (data,' KB',''))/1024 +
+convert(int,replace (index_size,' KB',''))/1024 + 
+convert(int,replace (unused,' KB',''))/1024 as Total_MB,
+(convert(int,replace (index_size,' KB',''))/1024)- (convert(int,replace (data,' KB',''))/1024)as IndexBigger_MB
+from #temp where (convert(int,replace (index_size,' KB',''))/1024) > 0
+order by 8  desc,2
+
+
+select top 10
+name, rows,
+convert(int,replace (reserved,' KB',''))/1024 as reserved_MB ,
+convert(int,replace (data,' KB',''))/1024 as data_MB,
+convert(int,replace (index_size,' KB',''))/1024 as index_size_MB, 
+convert(int,replace (unused,' KB',''))/1024 as unused_MB,
+convert(int,replace (reserved,' KB',''))/1024 +
+convert(int,replace (data,' KB',''))/1024 +
+convert(int,replace (index_size,' KB',''))/1024 + 
+convert(int,replace (unused,' KB',''))/1024 as Total_MB,
+(convert(int,replace (index_size,' KB',''))/1024)- (convert(int,replace (data,' KB',''))/1024)as IndexBigger_MB
+from #temp where convert(int,replace (index_size,' KB',''))/1024  = 0
+order by 2 desc
+
+
+
+
+select top 10
+name, rows,
+convert(int,replace (reserved,' KB',''))/1024 as reserved_MB ,
+convert(int,replace (data,' KB',''))/1024 as data_MB,
+convert(int,replace (index_size,' KB',''))/1024 as index_size_MB, 
+convert(int,replace (unused,' KB',''))/1024 as unused_MB,
+convert(int,replace (reserved,' KB',''))/1024 +
+convert(int,replace (data,' KB',''))/1024 +
+convert(int,replace (index_size,' KB',''))/1024 + 
+convert(int,replace (unused,' KB',''))/1024 as Total_MB,
+(convert(int,replace (index_size,' KB',''))/1024)- (convert(int,replace (data,' KB',''))/1024)as IndexBigger_MB
+from #temp 
+order by 3 desc
+
+
+select top 10
+name, rows,
+convert(int,replace (reserved,' KB',''))/1024 as reserved_MB ,
+convert(int,replace (data,' KB',''))/1024 as data_MB,
+convert(int,replace (index_size,' KB',''))/1024 as index_size_MB, 
+convert(int,replace (unused,' KB',''))/1024 as unused_MB,
+convert(int,replace (reserved,' KB',''))/1024 +
+convert(int,replace (data,' KB',''))/1024 +
+convert(int,replace (index_size,' KB',''))/1024 + 
+convert(int,replace (unused,' KB',''))/1024 as Total_MB,
+(convert(float,replace (index_size,' KB',''))/1024)/ (convert(float,replace (data,' KB',''))/1024)as Rel_Index_Data_MB
+from #temp where rows > 5000000 and convert(int,replace (index_size,' KB',''))/1024 > 0
+order by 8 
