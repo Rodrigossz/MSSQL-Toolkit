@@ -1,0 +1,225 @@
+--------------------------------------------------------------
+-- Setup the destination table & indexes
+--------------------------------------------------------------
+USE [dbadmin]
+GO
+
+-- Table is created using SELECT INTO due to column differences between SQL Server versions
+SELECT TOP 1 s.*, t.text, q.*, getdate() as collection_time 
+INTO [dbo].[query_stats]
+FROM sys.dm_exec_query_stats s
+CROSS APPLY sys.dm_exec_sql_text (s.sql_handle) t 
+CROSS APPLY sys.dm_exec_query_plan (s.plan_handle) q
+WHERE last_execution_time > GETDATE()-1
+GO
+
+TRUNCATE TABLE dbo.query_stats
+go
+
+CREATE CLUSTERED INDEX idx_collection_time ON [dbo].[query_stats]
+(collection_time ASC)
+GO
+
+CREATE NONCLUSTERED INDEX [idx_query_hash] ON [dbo].[query_stats]
+(query_hash ASC,query_plan_hash ASC)
+GO
+
+--------------------------------------------------------------
+-- Setup the collection
+--------------------------------------------------------------
+--Query to manually take a snapshot
+/*
+insert into dbadmin.dbo.query_stats
+select s.*, t.text, q.*, getdate()
+from sys.dm_exec_query_stats s
+cross apply sys.dm_exec_sql_text (s.sql_handle) t 
+cross apply sys.dm_exec_query_plan (s.plan_handle) q
+where last_execution_time > GETDATE()-1
+*/
+
+-- Manually delete old data
+/*
+delete from dbadmin.dbo.query_stats_new
+where collection_time < GETDATE() -31
+*/
+
+---Create a daily job to collect the query stats
+USE [msdb]
+GO
+
+BEGIN TRANSACTION
+DECLARE @ReturnCode INT
+SELECT @ReturnCode = 0
+
+IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'Database Maintenance' AND category_class=1)
+BEGIN
+EXEC @ReturnCode = msdb.dbo.sp_add_category @class=N'JOB', @type=N'LOCAL', @name=N'Database Maintenance'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+
+END
+
+DECLARE @jobId BINARY(16)
+EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'#DBA Collect Query Stats', 
+		@enabled=1, 
+		@notify_level_eventlog=0, 
+		@notify_level_email=0, 
+		@notify_level_netsend=0, 
+		@notify_level_page=0, 
+		@delete_level=0, 
+		@description=N'Collect query stats, text and execution plans and insert it into dbamin.dbo.query_stats', 
+		@category_name=N'Database Maintenance', 
+		@owner_login_name=N'sa', @job_id = @jobId OUTPUT
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [Step 1 - Collect Query Stats]    Script Date: 24/04/2015 3:34:58 PM ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Step 1 - Collect Query Stats', 
+		@step_id=1, 
+		@cmdexec_success_code=0, 
+		@on_success_action=3, 
+		@on_success_step_id=2, 
+		@on_fail_action=2, 
+		@on_fail_step_id=0, 
+		@retry_attempts=0, 
+		@retry_interval=0, 
+		@os_run_priority=0, @subsystem=N'TSQL', 
+		@command=N'insert into dbadmin.dbo.query_stats
+select s.*, t.text, q.*, getdate() 
+from sys.dm_exec_query_stats s
+cross apply sys.dm_exec_sql_text (s.sql_handle) t 
+cross apply sys.dm_exec_query_plan (s.plan_handle) q
+where last_execution_time > GETDATE()-1
+', 
+		@database_name=N'master', 
+		@output_file_name=N'D:\LocalApp\MSSQL2008\MSSQL10_50.MSSQLSERVER\MSSQL\log\CollectQueryStats.txt', 
+		@flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [Step 2 - Delete Old Query Stats]    Script Date: 24/04/2015 3:34:58 PM ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Step 2 - Delete Old Query Stats', 
+		@step_id=2, 
+		@cmdexec_success_code=0, 
+		@on_success_action=1, 
+		@on_success_step_id=0, 
+		@on_fail_action=2, 
+		@on_fail_step_id=0, 
+		@retry_attempts=0, 
+		@retry_interval=0, 
+		@os_run_priority=0, @subsystem=N'TSQL', 
+		@command=N'delete from  dbadmin.dbo.query_stats
+where collection_time < GETDATE()-31', 
+		@database_name=N'dbadmin', 
+		@flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobschedule @job_id=@jobId, @name=N'#DBA Collect Query Stats', 
+		@enabled=1, 
+		@freq_type=4, 
+		@freq_interval=1, 
+		@freq_subday_type=1, 
+		@freq_subday_interval=0, 
+		@freq_relative_interval=0, 
+		@freq_recurrence_factor=0, 
+		@active_start_date=20131210, 
+		@active_end_date=99991231, 
+		@active_start_time=231100, 
+		@active_end_time=235959
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobserver @job_id = @jobId, @server_name = N'(local)'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+COMMIT TRANSACTION
+GOTO EndSave
+QuitWithRollback:
+    IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
+EndSave:
+
+GO
+
+--------------------------------------------------------------
+-- Create usp_QueryStatsRep procedure
+--------------------------------------------------------------
+
+USE dbadmin
+GO
+
+IF EXISTS (select name from sysobjects where name = 'usp_QueryStatsRep')
+	DROP PROCEDURE usp_QueryStatsRep
+GO
+
+CREATE PROCEDURE usp_QueryStatsRep (@query_hash binary(8))
+AS
+BEGIN
+
+--Display query text and procedure/function name from the query_stats table if possible. Otherwise, get it from the DMVs
+IF EXISTS (select query_hash from query_stats where query_hash = @query_hash)
+	select distinct @query_hash as query_hash, DB_NAME(dbid) as dbname, OBJECT_NAME(OBJECTID, dbid) as proc_name ,SUBSTRING([text], statement_start_offset/2, (CASE WHEN statement_end_offset = -1 THEN LEN(CONVERT(NVARCHAR(MAX), [text])) * 2 ELSE statement_end_offset END -  statement_start_offset)/2) as sqlcmd from query_stats where query_hash = @query_hash
+ELSE
+	select distinct @query_hash as query_hash, DB_NAME(dbid) as dbname, OBJECT_NAME(OBJECTID, dbid) as proc_name ,SUBSTRING([text], statement_start_offset/2, (CASE WHEN statement_end_offset = -1 THEN LEN(CONVERT(NVARCHAR(MAX), [text])) * 2 ELSE statement_end_offset END -  statement_start_offset)/2) as sqlcmd from sys.dm_exec_query_stats s cross apply sys.dm_exec_sql_text (s.sql_handle) where query_hash = @query_hash 
+
+-- Collect data for the specified query_hash 
+select plan_handle,
+creation_time,
+last_execution_time,
+query_plan_hash, 
+execution_count, 
+total_elapsed_time,
+total_worker_time,
+total_logical_reads,
+total_physical_reads,
+total_logical_writes
+into #prerownum
+from dbadmin.dbo.query_stats
+where query_hash = @query_hash
+order by creation_time, last_execution_time
+
+-- Add the current query stats from sys.dm_exec_query_stats
+-- Means that the report contains real time data. Saves us from having to do another snapshot
+insert into #prerownum
+select plan_handle, creation_time, last_execution_time, query_plan_hash, execution_count, total_elapsed_time, 
+total_worker_time, total_logical_reads, total_physical_reads, total_logical_writes
+from sys.dm_exec_query_stats 
+where query_hash = @query_hash
+
+-- Add row number partitioned by plan creation_time so we can calculate deltas
+select ROW_NUMBER() OVER(partition by creation_time order by creation_time, last_execution_time) as rownum, * into #querystats from #prerownum
+
+-- remove the temp table without row numbers
+drop table #prerownum
+
+-- Uncomment to see the raw query stats. Duplicate rows means 0 executions between snapshots. 
+--select * from #querystats order by creation_time, last_execution_time
+
+-- Calculate deltas for each plan
+SELECT a.creation_time, 
+a.last_execution_time,
+a.query_plan_hash, 
+a.execution_count - ISNULL(b.execution_count,0) as execution_count_delta,
+a.total_elapsed_time - ISNULL(b.total_elapsed_time,0) as elapsed_time_delta,
+a.total_worker_time - ISNULL(b.total_worker_time,0) as worker_time_delta,
+a.total_logical_reads - ISNULL(b.total_logical_reads,0) as logical_reads_delta,
+a.total_physical_reads - ISNULL(b.total_physical_reads,0) as physical_reads_delta,
+a.total_logical_writes - ISNULL(b.total_logical_writes,0) as logical_writes_delta
+INTO #deltas
+FROM #querystats a
+LEFT JOIN #querystats b
+on a.creation_time = b.creation_time
+and a.rownum = b.rownum+1
+
+-- Uncomment to see delta values by plan
+--select * from #deltas
+
+--Aggregate the deltas into daily results
+select convert(date,last_execution_time) as date, 
+query_plan_hash, 
+sum(execution_count_delta) as daily_execution_count, 
+convert(decimal(18,4),sum(convert(decimal(18,4),elapsed_time_delta) / convert(decimal(18,4),execution_count_delta)) / 1000000) as elapsed_sec_per_exec, -- convert microseconds to seconds
+sum(worker_time_delta / execution_count_delta) as worker_time_per_exec, 
+sum(logical_reads_delta / execution_count_delta) as logical_reads_per_exec, 
+sum(physical_reads_delta / execution_count_delta) as physical_reads_per_exec, 
+sum(logical_writes_delta / execution_count_delta) as logical_writes_per_exec
+from #deltas
+where execution_count_delta > 0
+group by convert(date,last_execution_time), query_plan_hash
+order by convert(date,last_execution_time), query_plan_hash
+
+drop table #querystats
+drop table #deltas
+END

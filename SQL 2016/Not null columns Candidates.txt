@@ -1,0 +1,79 @@
+--This script reports table columns that allow NULL values but that currently have no NULL values, making them candidates for adding a NOT NULL constraint
+--This script also reports any tables that can't be checked, if the account under which the script is run doesn't have SELECT permission
+
+--Table-column data for columns to review
+declare @SuspectTableColumnsT table
+(
+	SchemaName sysname not null,
+	TableName sysname not null,
+	ColumnName sysname not null
+);
+
+--Table-column data for all table columns
+declare @TableColumnDefinitionsT table
+(
+	SchemaName sysname not null,
+	TableName sysname not null,
+	ColumnName sysname not null,
+	TypeName sysname not null
+);
+
+--Table-column data for skipped tables (e.g., issues accessing)
+declare @SkippedTablesT table
+(
+	SchemaName sysname not null,
+	TableName sysname not null,
+	ErrorMessage varchar(1024) not null
+);
+
+--Get all nullable columns
+insert into @TableColumnDefinitionsT
+select s.name, t.name, c.name, ty.name
+from sys.types ty
+	join sys.columns c on c.user_type_id = ty.user_type_id
+	join sys.tables t on c.object_id = t.object_id
+	join sys.schemas s on t.schema_id = s.schema_id
+where c.is_nullable = 1
+
+--For each nullable column, check for the existence of at least one null value
+--If none is found, then the column is a candidate for adding a not null constraint
+--If any tables can't be accessed, capture this and report it as well 
+declare @SchemaName sysname;
+declare @TableName sysname;
+declare @ColumnName sysname;
+declare c1 cursor local fast_forward
+for
+	select SchemaName, TableName, ColumnName FROM @TableColumnDefinitionsT
+	open c1
+	fetch next from c1
+	into @SchemaName, @TableName, @ColumnName
+	while @@FETCH_STATUS = 0
+	begin
+		declare @b bit;
+		declare @sql nvarchar(1024);
+		
+		begin try
+			set @sql = N'set @b = (case when exists(select 1 from ' + @SchemaName + '.' + @TableName + ' where ' + @ColumnName + ' is null) then 1 else 0 end);';
+			exec sp_executesql @sql, N'@b bit output', @b output;
+			
+			if (@b = 0)
+			begin
+				insert into @SuspectTableColumnsT
+				select @SchemaName, @TableName, @ColumnName;
+			end;
+		end try
+		begin catch
+			if (not exists(select 1 from @SkippedTablesT where SchemaName = @SchemaName and TableName = @TableName))
+			begin
+				insert into @SkippedTablesT
+				select @SchemaName, @TableName, ERROR_MESSAGE();
+			end
+		end catch
+				
+		fetch next from c1 into @SchemaName, @TableName, @ColumnName;
+	end
+	close c1;
+	deallocate c1;
+
+select * from @SuspectTableColumnsT order by SchemaName, TableName;
+select * from @SkippedTablesT order by SchemaName, TableName;

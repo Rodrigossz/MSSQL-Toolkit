@@ -1,0 +1,66 @@
+/************************************************************************
+*************************************************************************
+**					The following script will show you				   **
+** 	   If there are any open transactions running on your database.    **
+**	    While running the below query if you find any query which	   **
+**	    While running the below query if you find any query which	   **
+**	is running for long time it can be killed using following command  **
+**							KILL [session_id]						   **
+** you could also open the query window and use the following command  **
+**						  RollBack Transaction						   **
+*************************************************************************
+************************************************************************/
+DECLARE @databasename NVARCHAR(MAX)
+
+-- select name from master.dbo.sysdatabases
+SET @databasename = ''
+
+SELECT DMES.host_name AS 'Computer Name'
+	, nt_user_name AS 'Windows Username'
+	, mdsd.NAME AS 'Database with open Transaction'
+	, DMES.session_id AS 'Session ID'
+	, CASE 
+		WHEN spn.open_tran = 0
+			THEN 'There are no open transactions currently running on the' + ' ' + @databasename + ' ' + 'Database'
+		WHEN spn.open_tran = 1
+			THEN 'There is 1 open transaction currently running on the' + ' ' + @databasename + ' ' + 'Database'
+		WHEN spn.open_tran = 2
+			THEN 'There are 2 or more open transactions currently running on the' + ' ' + @databasename + ' ' + 'Database'
+		WHEN spn.open_tran >= 3
+			THEN 'There are 3 or more open transactions currently running on the' + ' ' + @databasename + ' ' + 'Database'
+		END AS 'Open Transactions'
+	, RTRIM(CAST(DMES.login_time AS NVARCHAR(30))) AS 'Date The Query window opened'
+	, CASE 
+		WHEN DMES.is_user_process = 0
+			THEN 'No'
+		WHEN DMES.is_user_process = 1
+			THEN 'Yes'
+		END AS 'User Process'
+	, CASE 
+		WHEN DMES.transaction_isolation_level = 0
+			THEN 'Unspecified'
+		WHEN DMES.transaction_isolation_level = 1
+			THEN 'Read Uncommitted'
+		WHEN DMES.transaction_isolation_level = 2
+			THEN 'Read Committed'
+		WHEN DMES.transaction_isolation_level = 3
+			THEN 'Repeatable Read'
+		WHEN DMES.transaction_isolation_level = 4
+			THEN 'Serializable'
+		WHEN DMES.transaction_isolation_level = 5
+			THEN 'Snapshot'
+		END AS 'Transaction Isolation Level'
+	, CASE 
+		WHEN DMES.LOCK_TIMEOUT = '-1'
+			THEN 'No lock time out specified, the lock will expire when the transaction has completed'
+		WHEN DMES.LOCK_TIMEOUT >= 0
+			THEN ' A Lockout Time of' + ' ' + CAST(CONVERT(REAL, (DMES.LOCK_TIMEOUT) / (1000.00)) AS VARCHAR(MAX)) + ' ' + 'Seconds has been specified'
+		END AS 'Lock Timeout'
+FROM master..sysprocesses AS spn
+JOIN sys.dm_exec_sessions AS DMES
+	ON DMES.session_id = spn.spid
+JOIN master.dbo.sysdatabases mdsd
+	ON spn.dbid = mdsd.dbid
+WHERE DMES.session_id = spn.spid
+	AND mdsd.NAME = @databasename
+	AND spn.open_tran <> 0

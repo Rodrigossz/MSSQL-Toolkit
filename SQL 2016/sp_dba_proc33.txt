@@ -1,0 +1,259 @@
+USE [master]
+GO
+
+/****** Object:  StoredProcedure [dbo].[sp_dba_proc33]    Script Date: 06/19/2014 19:07:52 ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+
+ALTER proc [dbo].[sp_dba_proc33] @type varchar(20) = 'TELA'
+as
+set nocount on
+
+declare @result table (
+Spid int,
+Cmd sysname,
+LoginName sysname,
+HostName sysname,
+BlkBy int,
+TranCount int,
+ResultCount int,
+PerCentComplete smallint,
+LastWaitType sysname,
+CpuTime bigint,
+DurationSeconds int,
+ActualStatus sysname,
+LogicalReads bigint,
+Reads bigint,
+Writes bigint,
+DbName sysname,
+ProgramName sysname,
+WaitTime int, 
+LastQuery varchar(300),
+ProcType varchar(20),
+ProcDateTime smalldatetime)
+
+insert @result
+select spid=r.session_id,command,case 
+when login_name is not null and login_name <> '' and login_name not like '% %' then login_name
+else nt_user_name end,
+host_name,blk=blocking_session_id,r.open_transaction_count,
+Result_Count = open_resultset_count, percent_complete,r.last_wait_type,
+r.cpu_time,duration_secs=r.total_elapsed_time/1000,r.status,r.logical_reads,r.reads,r.writes,
+DB_NAME(r.database_id),program_name, r.wait_time/1000 , substring([text],1,300) ,@type,GETDATE()  
+FROM sys.dm_exec_requests r  
+inner join sys.dm_exec_sessions p on r.session_id = p.session_id 
+CROSS APPLY sys.dm_exec_sql_text(sql_handle) st  
+CROSS APPLY sys.dm_exec_query_plan(plan_handle) As P2
+--WHERE --r.session_Id > 50   and r.session_Id <> @@spid
+union all
+select spid=p.session_id,'BEGIN TRAN',case 
+when login_name is not null and login_name <> '' and login_name not like '% %' then login_name
+else nt_user_name end,host_name,0,1,
+0, 0,'AWAITNG COMMAND',0,
+DATEDIFF(SECOND,dt.database_transaction_begin_time,GETDATE()),
+p.status,p.logical_reads,p.reads,p.writes,
+db_name(dt.database_id), program_name,DATEDIFF(SECOND,dt.database_transaction_begin_time,GETDATE()), 'AWAITING COMMAND',@type,GETDATE()
+FROM sys.dm_exec_sessions p 
+inner join sys.dm_tran_session_transactions st on p.session_id = st.session_id
+inner join sys.dm_tran_active_transactions at on at.transaction_id = st.transaction_id 
+inner join sys.dm_tran_database_transactions dt on at.transaction_id = dt.transaction_id
+where not exists (select 1 from sys.dm_exec_requests r  where r.session_id = p.session_id) and
+database_transaction_begin_time is not null --and p.session_id <> @@SPID
+
+if @type = 'TELA'
+select * from @result
+ELSE
+begin
+insert master..ResultAlertaDBA (Spid,Cmd,LoginName,HostName,BlkBy,TranCount,ResultCount,PerCentComplete,
+LastWaitType,CpuTime,DurationSeconds,ActualStatus,LogicalReads,Reads,Writes,DbName,ProgramName,
+WaitTime,LastQuery,ProcType,ProcDateTime)
+select Spid,Cmd,LoginName,HostName,BlkBy,TranCount,ResultCount,PerCentComplete,
+LastWaitType,CpuTime,DurationSeconds,ActualStatus,LogicalReads,Reads,Writes,DbName,ProgramName,
+WaitTime,LastQuery,ProcType,ProcDateTime from @result
+
+DECLARE @Subject VARCHAR (100)
+SET @Subject= 'Alerta '+ ltrim(rtrim(@type))+ '- Problemas no Servidor ' + @@ServerName
+
+DECLARE @tableHTML NVARCHAR(MAX) ;
+SET @tableHTML =
+N'<strong><font color="red">What is Currently Running in SQL Server</font></strong> <br>
+<table border="1">' +
+N'<tr>' +
+N'<th>Cmd</th>' +
+N'<th>Running Processes</th>' +
+N'<th>Total Cpu</th>' +
+N'<th>Total IO</th>' +
+N'<th>Total Reads</th>' +
+N'<th>Avg WaitTime(secs)</th>' +
+N'</tr>' +
+CAST ( (SELECT td=Cmd,''
+,td= count(*),'',td=SUM(cpuTime),'',td=SUM(Reads),'',td=SUM(LogicalReads),'',td=avg(WaitTime),''
+FROM @result
+GROUP BY Cmd
+ORDER BY count(*) desc
+FOR XML PATH('tr'), TYPE
+) AS NVARCHAR(MAX) ) +
+N'</table>
+<br><br>
+<strong><font color="red">TOP 10 Processes using CPU from SQL Server</font></strong> <br>'
+
+DECLARE @tableHTML4 NVARCHAR(MAX) ;
+SET @tableHTML4 =
+N'<table border="1">' +
+N'<tr>' +
+N'<th>SPID</th>' +
+N'<th>Loginame</th>' +
+N'<th>Cmd</th>' +
+N'<th>CPU</th>' +
+N'<th>IO</th>' +
+N'<th>Blocked By</th>' +
+N'<th>Query</th>' +
+N'<th>Status</th>' +
+N'<th>CpuTime Seconds</th>' +
+N'<th>Wait Type</th>' +
+N'</tr>' +
+CAST ((SELECT   top 10 td=spid,'',td=LoginName,''
+,td=Cmd ,'',td= sum(cpuTime) ,'',td= sum(Reads) ,'',td=blkBy,''
+,td=substring(LastQuery,1,50),'',td=ActualStatus,''
+,td=max(CpuTime),'',td=LastWaitType,''
+FROM @result a
+group by spid,LoginName,cmd,blkBy,substring(LastQuery,1,50),ActualStatus,LastWaitType
+order by sum(cpuTime) desc
+FOR XML PATH('tr'), TYPE
+) AS NVARCHAR(MAX) ) +
+N'</table> 
+<br><br>
+<strong><font color="red">Top 10 Questionable SQL Server Processes</font></strong> <br>'
+
+if @tableHTML4 is null
+SET @tableHTML4 = 'No Active Processes '+
+N'</table> 
+<br><br>
+<strong><font color="red">Top 10 Questionable SQL Server Processes</font></strong> <br>'
+
+
+DECLARE @tableHTML5 NVARCHAR(MAX) ;
+SET @tableHTML5 =
+N'<table border="1">' +
+N'<tr>' +
+N'<th>SPID</th>' +
+N'<th>Blocked</th>' +
+N'<th>DB Name</th>' +
+N'<th>CPU</th>' +
+N'<th>IO</th>' +
+N'<th>Seconds</th>' +
+N'<th>Host Name</th>' +
+N'<th>Login Name</th>' +
+N'<th>Program Name</th>' +
+N'</tr>' +
+CAST ((SELECT  top 20 td=spid,''
+,td=blkBy,''
+,td=dbname,''
+,td=cpuTime,''
+,td=Reads,''
+,td=DurationSeconds,''
+,td=convert(varchar(16), hostname),''
+,td=convert(varchar(20), LoginName),''
+,td=convert(varchar(20), ProgramName),''
+FROM @result r
+WHERE (TranCount > 0) or 
+exists (select 1 from @result r2 where r.BlkBy = r2.Spid) or BlkBy > 0
+ORDER BY cpuTime desc
+FOR XML PATH('tr'), TYPE
+) AS NVARCHAR(MAX) ) +
+N'</table> 
+
+<br><br>
+<strong><font color="red">SQL Server Resource Hogs</font></strong> <br>'
+
+if @tableHTML5 is null
+SET @tableHTML5 = 'No Questionable Processes '+
+N'</table> 
+<br><br>
+<strong><font color="red">SQL Server Resource Hogs</font></strong> <br>'
+
+DECLARE @tableHTML6 NVARCHAR(MAX) ;
+SET @tableHTML6 =
+N'<table border="1">' +
+N'<tr>' +
+N'<th>Program</th>' +
+N'<th>Client Count</th>' +
+N'<th>CPU Sum</th>' +
+N'<th>IO Sum</th>' +
+N'<th>Seconds Sum</th>' +
+N'</tr>' +
+CAST ((SELECT td=convert(varchar(50), ProgramName),''
+,td=count(*),''
+,td=sum(cpuTime),''
+,td=sum(Reads),''
+,td=max(DurationSeconds),''
+FROM @result
+WHERE spid > 50
+GROUP BY convert(varchar(50), ProgramName)
+ORDER BY 7 DESC 
+FOR XML PATH('tr'), TYPE
+) AS NVARCHAR(MAX) ) +
+N'</table>
+
+<br><br>
+<strong><font color="red">All Active Processes</font></strong> <br>'
+
+if @tableHTML6 is null
+SET @tableHTML6 = 'No Resource Hogs Processes '+
+N'</table> 
+<br><br>
+<strong><font color="red">All Active Processes</font></strong> <br>'
+
+DECLARE @tableHTML7 NVARCHAR(MAX) ;
+SET @tableHTML7 =
+N'<table border="1">' +
+N'<tr>' +
+N'<th>SPID</th>' +
+N'<th>Status</th>' +
+N'<th>Login Name</th>' +
+N'<th>Hostname</th>' +
+N'<th>DB Name</th>' +
+N'<th>Cmd</th>' +
+N'</tr>' +
+CAST ( (SELECT td=[spid],''
+,td= [ActualStatus],''
+,td=LoginName,''
+,td=[hostname],''
+,td=[dbname],''
+,td=[cmd],''
+FROM @result
+--where dbname not IN ('master', 'msdb')  
+ORDER BY 4,5 desc
+FOR XML PATH('tr'), TYPE
+) AS NVARCHAR(MAX) ) +
+N'</table>'
+
+if @tableHTML7 is null
+SET @tableHTML7 = 'No Active Processes '+
+N'</table>'
+
+
+declare @body2 varchar(max)
+set @body2 = @tableHTML + ' ' + @tableHTML4  + ' ' + @tableHTML5  + ' ' + @tableHTML6 + ' ' +@tableHTML7
+--select @body2
+
+EXEC msdb.dbo.sp_send_dbmail
+@profile_name = 'SMTP - MTO-BDPRI',
+@recipients = 'dba@minutoseguros.com.br',
+--@recipients = 'rsouza@hp.com',
+@subject = @Subject,
+@body = @body2,
+@body_format = 'HTML' 
+end
+
+
+
+GO
+
+

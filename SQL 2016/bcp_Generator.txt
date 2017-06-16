@@ -1,0 +1,24 @@
+--OUT
+
+select 'bcp siscom.'+o.name+' out '+o.name+'.txt -USISCOM -PTVGSQL001 -c -SJBHAINFCL007\JBSQLSCMT01 -F1 -L'+convert(varchar(10),rowcnt-1) 
+from sysindexes i join  sysobjects o on o.id = i.id
+where o.type = 'U' and indid in (0,1) and rowcnt <= 3000 and o.name <> 'dtproperties'
+union 
+select 'bcp siscom.'+o.name+' out '+o.name+'.txt -USISCOM -PTVGSQL001 -c -SJBHAINFCL007\JBSQLSCMT01 -F1 -L5000' 
+from sysindexes i join  sysobjects o on o.id = i.id
+where o.type = 'U' and indid in (0,1) and rowcnt > 3000 and o.name <> 'dtproperties'
+order by 1
+
+
+--IN
+
+select 'bcp siscom.siscom.'+o.name+' in '+o.name+'.txt -T -c -SHPSERVER03\SQL2005 -E'
+from sysindexes i join  sysobjects o on o.id = i.id
+where o.type = 'U' and indid in (0,1) and rowcnt <= 3000 and o.name <> 'dtproperties'
+union 
+select 'bcp siscom.siscom.'+o.name+' in '+o.name+'.txt -T -c -SHPSERVER03\SQL2005 -E' 
+from sysindexes i join  sysobjects o on o.id = i.id
+where o.type = 'U' and indid in (0,1) and rowcnt > 3000 and o.name <> 'dtproperties'
+order by 1
+
+

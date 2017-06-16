@@ -1,0 +1,2 @@
+SELECT SUSER_NAME(member_principal_id),SUSER_NAME(role_principal_id) AS ServerRole
+ FROM sys.server_role_members

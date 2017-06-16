@@ -1,0 +1,131 @@
+SET NOCOUNT ON
+
+
+
+PRINT '---------------------------------------------------------------'
+
+PRINT 'DefragIndexes.sql script started on database [' + DB_NAME() + ']'
+
+PRINT '---------------------------------------------------------------'
+
+PRINT ''
+
+
+
+-- identify tables with indexes that are fragmented above 5 percent 
+
+
+
+ SELECT s.Name AS SchemaName,
+
+ o.Name AS TableName,
+
+ MAX(i.avg_fragmentation_in_percent) AS [Level]
+
+ INTO #DefragLevel
+
+ FROM sys.dm_db_index_physical_stats (DB_ID(), NULL, NULL, NULL, 'LIMITED') AS i
+
+ INNER JOIN sys.objects AS o
+
+ ON i.[object_id] = o.[object_id]
+
+ INNER JOIN sys.schemas AS s
+
+ ON o.[schema_id] = s.[schema_id]
+
+ WHERE i.index_id > 0
+
+ AND i.avg_fragmentation_in_percent > 5
+
+GROUP BY s.Name,
+
+ o.Name
+
+
+
+DECLARE @Level float,
+
+ @SchemaName sysname,
+
+ @TableName sysname,
+
+ @Command nvarchar(500)
+
+
+
+-- process each table
+
+DECLARE DefragCursor CURSOR FOR SELECT * FROM #DefragLevel ORDER BY [Level] DESC
+
+OPEN DefragCursor
+
+FETCH NEXT FROM DefragCursor INTO @SchemaName, @TableName, @Level
+
+WHILE @@FETCH_STATUS = 0 BEGIN
+
+
+
+ -- set base command
+
+ SET @Command = N'ALTER INDEX ALL ON [' + @SchemaName + '].[' + @TableName + '] '
+
+
+
+-- reorganize indexes below 30% fragmentation or rebuild indexes above 30%
+
+ IF @Level < 30 BEGIN
+
+ SET @Command = @Command + 'REORGANIZE'
+
+ END ELSE BEGIN
+
+ SET @Command = @Command + 'REBUILD WITH (FILLFACTOR = 70, SORT_IN_TEMPDB = ON, ONLINE = OFF)'
+
+ END
+
+
+
+ -- execute command
+
+ PRINT 'Defragmenting table [' + @SchemaName + '].[' + @TableName + '] from ' + CAST(@Level AS varchar(20)) + '%...'
+
+ EXEC(@Command)
+
+
+
+ -- get next table to defragment
+
+ FETCH NEXT FROM DefragCursor INTO @SchemaName, @TableName, @Level
+
+
+
+END
+
+
+
+-- cleanup
+
+CLOSE DefragCursor
+
+DEALLOCATE DefragCursor
+
+DROP TABLE #DefragLevel
+
+
+
+-- end process
+
+PRINT ''
+
+PRINT '-------------------------------------------------------------------'
+
+PRINT 'DefragIndexes.sql script finished'
+
+PRINT '-------------------------------------------------------------------'
+
+
+
+
+
+

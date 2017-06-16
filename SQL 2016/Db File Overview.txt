@@ -1,0 +1,143 @@
+SET NOCOUNT ON 
+
+/****************************************************************************************************
+**	declare table & variables
+****************************************************************************************************/
+
+declare @dbcnt int,
+		@DBName varchar(256),
+		@FileName varchar(256),
+		@FileType varchar(256),
+		@FreeSpaceInMB decimal(38,2),
+		@NumOfVLF int,
+		@Query varchar(max),
+		@vlfcnt int
+
+
+declare @tmp table
+(DBName varchar(256),
+[FileName] varchar(256),
+FileLoc varchar(256),
+FileType varchar(256),
+SizeInMB decimal(38,2),
+FreeSpaceInMB decimal(38,2),
+GrowthRate varchar(256),
+MaxSize varchar(256),
+NumOfVLF int default 0,
+CurrentState varchar(256))
+
+declare @tmpdb table
+(DBName varchar(256),
+[FileName] varchar(256),
+FileType varchar(256))
+
+declare @vlf table
+(FileID int,
+FileSize bigint,
+StartOffset bigint,
+FSeqNo int,
+[Status] int,
+Parity int,
+CreateLSN numeric(25,0))
+
+declare @tmpspace table
+(FreeSpaceInMB decimal(38,2))
+
+/****************************************************************************************************
+**	Get Main Data
+****************************************************************************************************/
+
+insert into @tmp
+(DBName,[FileName],FileLoc,FileType,SizeInMB,FreeSpaceInMB,GrowthRate,MaxSize)
+select '[' + db_name(m.database_id) + ']' as DBName,
+m.name as [FileName],m.physical_name,m.type_desc,
+cast(m.size/128.0 as decimal(38,2)) as SizeInMB,
+m.size/128.0 - cast(FILEPROPERTY(m.name,'Spaceused')as int)/128.0 as FreeSpaceInMB,
+case m.is_percent_growth
+	when 1 then cast(m.growth as varchar) + '%'
+	else cast(cast(m.growth/128.0 as decimal(38,2))as varchar) + ' MB'
+end as GrowthRate,
+case
+	when m.max_size = -1 then 'Unrestricted'
+	else cast(cast(m.max_size/128.0 as decimal(38,2)) as varchar(256))
+end as max_size
+from sys.master_files m
+inner join sys.databases db on
+m.database_id = db.database_id
+where db.state_desc = 'ONLINE'
+
+/****************************************************************************************************
+**	Gather VLFs & Free Space
+****************************************************************************************************/
+
+insert into @tmpdb
+(DBName,[FileName],FileType)
+select distinct DBName,[FileName],FileType
+from @tmp
+
+select @dbcnt = count(DBName)
+from @tmpdb
+
+while @dbcnt > 0
+BEGIN
+	
+	select top 1 @DBName = DBName,@FileName = [FileName],@FileType = FileType
+	from @tmpdb
+
+	set @Query = 'use ' + @DBName + char(10)
+	set @Query = @Query + 'select size/128.0 - cast(FILEPROPERTY(name,' + char(39) + 'Spaceused' + char(39) + ')'
+	set @Query = @Query + 'as int)/128.0 from ' + @DBName + '.sys.database_files' + char(10)
+	set @Query = @Query + 'where name = ' + char(39) + @FileName + char(39)
+
+	insert into @tmpspace
+	exec(@query)
+
+	select @FreeSpaceInMB = FreeSpaceInMB
+	from @tmpspace
+
+	update t
+	set t.FreeSpaceInMB = @FreeSpaceInMB
+	from @tmp t
+	where DBName = @DBName and 
+	[FileName] = @FileName
+
+	IF @FileType = 'LOG'
+	BEGIN
+		set @query = 'use ' + @DBName + char(10)
+		set @query = @query + 'DBCC loginfo'
+
+		insert into @vlf
+		exec(@query)
+
+		select @vlfcnt = count(*)
+		from @vlf
+
+		update t
+		set t.NumOfVLF = @vlfcnt
+		from @tmp t
+		where DBName = @DBName and 
+		[FileName] = @FileName
+
+		delete from @vlf
+	END
+
+	delete t
+	from @tmpdb t
+	where DBName = @DBName and 
+	[FileName] = @FileName
+
+	delete 
+	from @tmpspace
+
+	select @dbcnt = count(DBName)
+	from @tmpdb
+
+END
+
+/****************************************************************************************************
+**	Final Results
+****************************************************************************************************/
+
+select replace(replace(DBName,'[',''),']','')as DBName,[FileName],FileLoc,FileType,cast(SizeInMB as varchar(256))as SizeInMB,
+cast(isnull(FreeSpaceInMB,0) as varchar(256)) as FreeSpaceInMB,GrowthRate,MaxSize,NumOfVLF
+from @tmp

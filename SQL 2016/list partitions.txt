@@ -1,0 +1,13 @@
+SELECT ps.name AS PSName, 
+      dds.destination_id AS PartitionNumber, 
+      fg.name AS FileGroupName
+FROM (((sys.tables AS t 
+   INNER JOIN sys.indexes AS i 
+      ON (t.object_id = i.object_id))
+   INNER JOIN sys.partition_schemes AS ps 
+      ON (i.data_space_id = ps.data_space_id))
+   INNER JOIN sys.destination_data_spaces AS dds 
+      ON (ps.data_space_id = dds.partition_scheme_id))
+   INNER JOIN sys.filegroups AS fg
+      ON dds.data_space_id = fg.data_space_id
+WHERE  (t.name = 'NOME DA SUA TABELA!!!!!!!')and  (i.index_id IN (0,1)) 

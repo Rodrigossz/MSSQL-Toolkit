@@ -1,0 +1,50 @@
+SELECT DISTINCT TOP 10
+t.TEXT QueryName,
+s.execution_count AS ExecutionCount,
+s.max_elapsed_time AS MaxElapsedTime,
+ISNULL(s.total_elapsed_time / s.execution_count, 0) AS AvgElapsedTime,
+s.creation_time AS LogCreatedOn,
+ISNULL(s.execution_count / DATEDIFF(s, s.creation_time, GETDATE()), 0) AS FrequencyPerSec
+FROM sys.dm_exec_query_stats s
+CROSS APPLY sys.dm_exec_sql_text( s.sql_handle ) t
+ORDER BY
+s.max_elapsed_time DESC
+GO
+
+SELECT * FROM master..sysprocesses WHERE status = 'runnable' ORDER BY cpu desc
+DBCC INPUTBUFFER (53)
+
+DECLARE @handle binary(20)
+
+SELECT @handle = sql_handle FROM master..sysprocesses WHERE spid = 53
+
+SELECT [text] FROM ::fn_get_sql(@handle)
+
+go
+
+select 
+sysd.name
+,sysddmig.*,sysddmid.statement as table_name
+,sysddmic.column_id,sysddmic.column_name
+,sysddmic.column_usage,sysddmigs.user_seeks
+,sysddmigs.avg_total_user_cost,sysddmigs.avg_user_impact
+from 
+sys.dm_db_missing_index_details as sysddmid
+cross apply sys.dm_db_missing_index_columns (sysddmid.index_handle) sysddmic
+inner join sys.dm_db_missing_index_groups as sysddmig on sysddmig.index_handle = sysddmid.index_handle
+inner join sys.dm_db_missing_index_group_stats as sysddmigs on sysddmig.index_group_handle = sysddmigs.group_handle
+inner join sys.databases as sysd on sysd.database_id = sysddmid.database_id
+order by 
+sysddmigs.avg_user_impact desc
+,sysddmig.index_group_handle
+,sysddmig.index_handle
+,sysddmic.column_id;
+go
+
+select db_name(d.database_id) dbname, object_name(d.object_id) tablename, d.index_handle,
+d.equality_columns, d.inequality_columns, d.included_columns, d.statement as fully_qualified_object, gs.*
+from  sys.dm_db_missing_index_groups g
+       join sys.dm_db_missing_index_group_stats gs on gs.group_handle = g.index_group_handle
+       join sys.dm_db_missing_index_details d on g.index_handle = d.index_handle
+where  d.database_id =  d.database_id and d.object_id =  d.object_id 
+go

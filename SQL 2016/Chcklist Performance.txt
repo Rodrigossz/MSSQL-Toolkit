@@ -1,0 +1,72 @@
+SQL Server 2014 Checklist for Performance
+By Rudy Panigas, 2014/12/29
+
+Hello once again :)
+
+
+Over time and after discussing this topic with other DBAs, I have compiled a short checklist to help with performance. Below are some areas and comments for each. 
+I would like to hear from you as to what your checklist includes. My goal here is to make an excellent checklist that we could all use.
+Thanks,
+Rudy 
+
+SQL Server 2014 Checklist for Performance
+
+Quick Tips
+Test your changes on your test servers
+Make changes incrementally - small change at a time
+Use 64 bit, even on a laptop
+Memory
+Set MIN and MAX values for memory.
+Enable Optimize for Ad Hoc Workloads
+
+CPU
+Set "Cost Threshold for Parallelism" = OLTP = 45 and Reporting = 25. Default is 5 which is to low
+Set "Max Degree of Parallelism"  leave it on after you have changed the cost threshold. 
+Set NUMA = number of physical processors, not cores, is a good place to start
+
+Disk
+Place TEMPDB on separate disks,
+Set TEMPDB data and logs onto separate disks
+Use multiple files wtih equal sizes, not equal to the number of processors
+Use index compression
+More disks is better but limited to the number of controllers
+
+Statistics
+Enable AUTO_CREATE and AUTO_UPDATE 
+Make plans to manual updates on statistics with full scans
+
+Defragment Indexes
+Number of pages matter,defrag below 300-500 pages
+Cannot defrag below 8 pages
+Defragment indexes with less then 50% fragmentation and rebuilt index if higher than 50%
+
+DO NOT USE 
+Disable AUTO_CLOSE
+Disable AUTO_SHRINK
+DO NOT use Profiler GUI, use extended events, even in SQL 2008
+Create server side trace using T-SQL scripts. Can you use the GUI to create but execute via T-SQL
+
+Database Design
+Separate log and data files onto separate disks
+Use multiple file groups even on a single disk
+Turn off AUTO_GROW (depends). If not, use fixed growth, not percentage. Do not leave defaults in place
+Normalize the data as it benefits performance
+Enforce constraints, have foreign keys, primary keys, unique indexes
+Use narrow indexes, when possible
+Indexes work better on integers - performance better
+Don't create too many indexes (depends)
+Rebuilt cluster indexes 
+
+Coding
+Return only use data you need
+Use stored procedures or parameterized queries
+Avoid cursors, WHILE, LOOP
+Quality all object names
+Avoid using sp_* stored procedure names
+Avoid functions on columns and LIKE command
+SET NOCOUNT ON
+Don't nest the views and join views to views
+Don't use NOLOCK 
+Avoid recompiling execution plans
+Use table variables instead of temp tables
+Multi statement table valued functions are very bad!

@@ -1,0 +1,32 @@
+--Specify the name of the database to count in the following line
+USE AdventureWorks; --Added by James_DBA
+GO
+
+--Code modified from original posting on SQLServerCentral.Com
+--URL: http://www.sqlservercentral.com/scripts/Miscellaneous/30324/
+SELECT o.name AS "Table Name", i.rowcnt AS "Row Count"
+FROM sysobjects o, sysindexes i
+WHERE i.id = o.id
+AND indid IN(0,1)
+--This specifies 'user' databases only
+AND xtype = 'u' --Added by James_DBA
+--This omits the diagrams table of the database
+--You may find other system tables will need to be ommitted,
+--you would just name them all here using the <> operator
+--i.e. o.name <> dtproperties, o.name <> 'sysdiagrams'
+AND o.name <> 'sysdiagrams' --Added by James-DBA
+
+--You could also look further into filtering out temp tables,
+--or user specified tables
+ORDER BY i.rowcnt DESC --I found it more useful to display 
+--the results by 'Row Count' Descending
+--The original posting suggested to sort by Table name by
+--using the following line, instead of the line I use above:
+--ORDER BY o.name
+
+--The following line adds up all the rowcount results and places
+--the final result into a seperate column (below the first resulting table)
+COMPUTE SUM(i.rowcnt); --Added by James_DBA
+GO
+
+

@@ -1,0 +1,108 @@
+
+SET NOCOUNT ON;
+USE tempdb;
+GO
+ 
+IF OBJECT_ID('#hubbabubba','U') IS NOT NULL
+BEGIN
+	DROP TABLE #hubbabubba;
+END
+ 
+CREATE TABLE #hubbabubba (
+	someint INT PRIMARY KEY NONCLUSTERED IDENTITY(1,1)
+	,somechar VARCHAR(50)
+	,somedate DATE
+	,somebit BIT DEFAULT(0))
+ 
+IF EXISTS (SELECT name FROM sys.partition_schemes WHERE name = 'PartitionToPrimary')
+	BEGIN
+		DROP PARTITION SCHEME PartitionToPrimary
+	END
+IF EXISTS (SELECT name FROM sys.partition_functions WHERE name = 'PartitionByMonth')
+	BEGIN
+		DROP PARTITION FUNCTION PartitionByMonth
+	END
+ 
+CREATE PARTITION FUNCTION PartitionByMonth (DATE)
+	AS RANGE RIGHT 
+	FOR VALUES ('2014/01/01', '2014/02/01', '2014/03/01', '2014/04/01', '2014/05/01','2014/06/01'
+		, '2014/07/01', '2014/08/01', '2014/09/01', '2014/10/01', '2014/11/01', '2014/12/01');
+ 
+CREATE PARTITION SCHEME PartitionToPrimary 
+	AS PARTITION PartitionByMonth 
+	ALL TO ([PRIMARY]);
+ 
+CREATE CLUSTERED INDEX idx_hubba_somedate ON #hubbabubba (somedate)
+	ON PartitionToPrimary (somedate);
+GO
+ 
+/* 
+Establish a Date range to be used for Random date generation and table population
+We only have the table partitioned for the current year so limiting the dates to this
+year is essential
+*/
+DECLARE @BeginDate DATE = '2014-01-01'
+		,@EndDate DATE = '2014-12-31'
+ 
+/* Populate some data */
+INSERT INTO #hubbabubba
+        ( somechar,somedate )
+VALUES  ( 'DidmyDefaultApply?'
+	,DATEADD(DAY,RAND(CHECKSUM(NEWID())) * ( 1 + DATEDIFF(DAY, @EndDate,@BeginDate) ), @EndDate))
+GO 5000
+ 
+SELECT *
+	FROM #hubbabubba;
+ 
+USE tempdb;
+GO
+ 
+SP_HELP '#hubbabubba'
+/* Demonstrates the existence of 
+2 constraints on the temp table 
+2 indexes on the temp table
+	1 clustered (supports the partition)
+	1 nonclustered
+ 
+*/
+/* Base query for the following attributed to Kendra Little 
+This demonstrates that Partitions can be created on temp tables 
+*/
+SELECT  OBJECT_NAME(si.OBJECT_ID) AS OBJECT_NAME ,
+		pf.name AS pf_name ,
+        ps.name AS partition_scheme_name ,
+        p.partition_number ,
+        rv.VALUE AS range_value ,
+        SUM(CASE WHEN si.index_id IN ( 1, 0 ) THEN p.ROWS
+                    ELSE 0
+            END) AS num_rows ,
+        SUM(dbps.reserved_page_count) * 8 / 1024. AS reserved_mb_all_indexes ,
+        SUM(CASE ISNULL(si.index_id, 0)
+                WHEN 0 THEN 0
+                ELSE 1
+            END) AS num_indexes
+FROM    sys.destination_data_spaces AS dds
+        INNER JOIN sys.data_spaces AS ds 
+			ON dds.data_space_id = ds.data_space_id
+        INNER JOIN sys.partition_schemes AS ps 
+			ON dds.partition_scheme_id = ps.data_space_id
+        INNER JOIN sys.partition_functions AS pf 
+			ON ps.function_id = pf.function_id
+        LEFT OUTER JOIN sys.partition_range_values AS rv 
+			ON pf.function_id = rv.function_id
+            AND dds.destination_id = CASE pf.boundary_value_on_right
+                                        WHEN 0 THEN rv.boundary_id
+                                        ELSE rv.boundary_id + 1
+                                    END
+        LEFT OUTER JOIN sys.indexes AS si 
+			ON dds.partition_scheme_id = si.data_space_id
+        LEFT OUTER JOIN sys.partitions AS p 
+			ON si.OBJECT_ID = p.OBJECT_ID
+			AND si.index_id = p.index_id
+			AND dds.destination_id = p.partition_number
+        LEFT OUTER JOIN sys.dm_db_partition_stats AS dbps 
+			ON p.OBJECT_ID = dbps.OBJECT_ID
+            AND p.partition_id = dbps.partition_id
+WHERE p.OBJECT_ID = OBJECT_ID('#hubbabubba','U')
+GROUP BY p.partition_number ,pf.name,ps.name ,si.OBJECT_ID ,rv.VALUE;
+GO

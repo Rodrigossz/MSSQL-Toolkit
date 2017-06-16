@@ -1,0 +1,188 @@
+SELECT TOP 50
+qs.total_worker_time / execution_count AS avg_worker_time,
+substring (st.text, (qs.statement_start_offset / 2) + 1,
+( ( CASE qs.statement_end_offset WHEN -1
+THEN datalength (st.text)
+ELSE qs.statement_end_offset END
+- qs.statement_start_offset)/ 2)+ 1)
+AS statement_text,
+*
+FROM sys.dm_exec_query_stats AS qs
+CROSS APPLY sys.dm_exec_sql_text (qs.sql_handle) AS st
+ORDER BY
+avg_worker_time DESC
+
+SELECT TOP 50
+(total_logical_reads + total_logical_writes) AS total_logical_io,
+(total_logical_reads / execution_count) AS avg_logical_reads,
+(total_logical_writes / execution_count) AS avg_logical_writes,
+(total_physical_reads / execution_count) AS avg_phys_reads,
+substring (st.text,
+(qs.statement_start_offset / 2) + 1,
+((CASE qs.statement_end_offset WHEN -1
+THEN datalength (st.text)
+ELSE qs.statement_end_offset END
+- qs.statement_start_offset)/ 2)+ 1)
+AS statement_text,
+*
+FROM sys.dm_exec_query_stats AS qs
+CROSS APPLY sys.dm_exec_sql_text (qs.sql_handle) AS st
+ORDER BY total_logical_io DESC
+
+
+SELECT db_name (a.database_id) AS [DatabaseName],
+b.name AS [FileName],
+a.File_ID AS [FileID],
+CASE WHEN a.file_id = 2 THEN 'Log' ELSE 'Data' END AS [FileType],
+a.Num_of_Reads AS [NumReads],
+a.num_of_bytes_read AS [NumBytesRead],
+a.io_stall_read_ms AS [IOStallReadsMS],
+a.num_of_writes AS [NumWrites],
+a.num_of_bytes_written AS [NumBytesWritten],
+a.io_stall_write_ms AS [IOStallWritesMS],
+a.io_stall [TotalIOStallMS],
+DATEADD (ms, -a.sample_ms, GETDATE ()) [LastReset],
+( (a.size_on_disk_bytes / 1024) / 1024.0) AS [SizeOnDiskMB],
+UPPER (LEFT (b.physical_name, 2)) AS [DiskLocation]
+FROM sys.dm_io_virtual_file_stats (NULL, NULL) a
+JOIN sys.master_files b
+ON a.file_id = b.file_id AND a.database_id = b.database_id
+ORDER BY a.io_stall DESC;
+
+/*****************************************************
+Setup a temporary table to fetch the data we need from
+sys.dm_exec_query_stats.
+******************************************************/
+IF OBJECT_ID('tempdb..#temp') IS NOT NULL DROP TABLE #temp
+CREATE TABLE #temp
+(
+ objectid INT,
+ dbid INT,
+ [Object] VARCHAR(8000),
+ [IndividualQuery] NVARCHAR(MAX),
+ [TotalRunTime (s)] DECIMAL(28,2),
+ [TotalTimeWaiting (s)] DECIMAL(28,2),
+ [%TimeRunning] DECIMAL(28,2),
+ [%TimeWaiting] DECIMAL(28,2),
+ [ExecutionCount] INT,
+ [AverageRunTime] DECIMAL(28,2),
+ [AverageTimeWaiting (s)] DECIMAL(28,2),
+ [DatabaseName] NVARCHAR(MAX),
+ [QueryPlan] XML
+)
+
+
+/*****************************************************
+Populate the temporary table with the data we need
+from sys.dm_exec_query_stats.
+******************************************************/
+INSERT INTO #temp
+SELECT TOP 20
+ qt.objectid,
+ qt.dbid,
+ [Object] = '',
+ [IndividualQuery] = SUBSTRING (qt.text,(qs.statement_start_offset/2) + 1,
+ ((CASE WHEN qs.statement_end_offset = -1
+ THEN LEN(CONVERT(NVARCHAR(MAX), qt.text)) * 2
+ ELSE qs.statement_end_offset
+ END - qs.statement_start_offset)/2) + 1),
+ [TotalRunTime (s)] = CAST(qs.total_elapsed_time/ 1000000.0 AS DECIMAL(28,2)),
+ [TotalTimeWaiting (s)] = CAST((qs.total_elapsed_time - qs.total_worker_time) / 1000000.0 AS DECIMAL(28,2)),
+ [%TimeRunning] = CAST(qs.total_worker_time * 100.0 / qs.total_elapsed_time AS DECIMAL(28,2)),
+ [%TimeWaiting] = CAST((qs.total_elapsed_time - qs.total_worker_time)* 100.0 / qs.total_elapsed_time AS DECIMAL(28, 2)),
+ [ExecutionCount] = qs.execution_count,
+ [AverageRunTime] = CAST(qs.total_elapsed_time / 1000000.0 / qs.execution_count AS DECIMAL(28, 2)),
+ [AverageTimeWaiting (s)] = CAST((qs.total_elapsed_time - qs.total_worker_time) / 1000000.0 / qs.execution_count AS DECIMAL(28, 2)),
+ [DatabaseName] = DB_NAME(qt.dbid),
+ [QueryPlan] = qp.query_plan
+FROM
+ sys.dm_exec_query_stats qs
+ CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) as qt
+ CROSS APPLY sys.dm_exec_query_plan(qs.plan_handle) qp
+WHERE
+ qs.total_elapsed_time > 0
+ AND DB_NAME(qt.dbid) IS NOT NULL
+ORDER BY
+ [TotalTimeWaiting (s)] DESC
+
+
+/*****************************************************
+This section of code is all about getting the object
+name from the dbid and the object id.
+******************************************************/
+ 
+-- Declare a Cursor
+DECLARE FetchObjectName CURSOR FOR
+ SELECT
+ objectid, dbid
+ FROM
+ #temp
+ 
+-- Open the cursor
+OPEN FetchObjectName
+ 
+-- Declare some vars to hold the data to pass into the cursor
+DECLARE @var1 INT,
+ @var2 INT
+DECLARE @sql VARCHAR(MAX)
+DECLARE @object VARCHAR(MAX)
+ 
+-- Create a temporary table to hold the result of the dynamic SQL
+IF OBJECT_ID('tempdb..#object') IS NOT NULL DROP TABLE #object
+CREATE TABLE #object
+(
+ objectname VARCHAR(MAX)
+)
+ 
+-- Loop through the 20 records from above and fetch the object names
+FETCH NEXT FROM FetchObjectName INTO @var1, @var2
+WHILE ( @@FETCH_STATUS <> -1 )
+BEGIN
+ IF ( @@FETCH_STATUS <> -2 )
+ 
+ -- Set the SQL we need to execute
+ SET @sql = 'USE [' + DB_NAME(@var2) + '];
+ SELECT OBJECT_SCHEMA_NAME(' + CONVERT(VARCHAR(MAX),@var1) + ',' + CONVERT(VARCHAR(MAX),@var2) + ') + ''.'' + ' + 'OBJECT_NAME(' + CONVERT(VARCHAR(MAX),@var1) + ');'
+ 
+ -- Make sure the table is empty!
+ TRUNCATE TABLE #object
+ 
+-- Fetch the name of the object
+ INSERT INTO #object
+ EXEC(@sql)
+ 
+-- Set the object name to the local var.
+ SELECT @object = objectname FROM #object
+ 
+-- Update the original results
+ UPDATE #temp
+ SET
+ [Object] = RTRIM(LTRIM(@object))
+ WHERE
+ objectid = @var1
+ and dbid = @var2
+ 
+ -- Go around the loop....
+ FETCH NEXT FROM FetchObjectName INTO @var1, @var2
+ END
+CLOSE FetchObjectName
+DEALLOCATE FetchObjectName
+
+/*****************************************************
+The final result set
+******************************************************/
+SELECT
+ [Object] = [DatabaseName] + '.' + [Object],
+ [IndividualQuery],
+ [TotalRunTime (s)],
+ [TotalTimeWaiting (s)],
+ [%TimeRunning],
+ [%TimeWaiting],
+ [ExecutionCount],
+ [AverageRunTime],
+ [AverageTimeWaiting (s)],
+ [QueryPlan]
+FROM
+ #temp
+ORDER BY
+ [TotalTimeWaiting (s)] DESC

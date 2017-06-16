@@ -1,0 +1,74 @@
+Create procedure [dbo].[Database_Object_Last_used_details]
+
+
+as 
+BEGIN
+
+IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[UnusedObjectlist]') AND type in (N'U'))
+DROP TABLE [dbo].[UnusedObjectlist]
+
+CREATE TABLE [dbo].[UnusedObjectlist](
+	ObjectName varchar(50),
+	ObjectType varchar(25),
+	ServerName	varchar(20),
+	DatabaseName varchar(20),
+	CreatedDate Datetime,
+	ModifyDate datetime,
+	last_usedDate datetime
+	)
+
+declare @CountDataBase as int
+set @CountDataBase = 0
+set @CountDataBase = (SELECT count(name) FROM master..sysdatabases where name not in ('master','tempdb','msdb','mode'))
+
+Declare @GetDataBase as table ([Id] [bigint] IDENTITY(1,1) NOT NULL,DBName varchar(20))
+
+insert into @GetDataBase (DBName) (SELECT name FROM master..sysdatabases where name not in ('master','tempdb','msdb','mode'))
+
+declare @StartCounter as int
+set @StartCounter = 1
+
+while(@StartCounter <= @CountDataBase)
+begin
+
+declare @DBName as varchar(20)
+set @DBName = ''
+set @DBName = (select DBName from @GetDataBase where Id = @StartCounter)
+
+declare @Query1 nvarchar(Max) 
+set @Query1 = 'insert into UnusedObjectlist
+select distinct(name),type_desc,' + '''' + @@SERVERNAME + '''' + ',' + '''' +  @DBName + '''' +  ',create_date,modify_date,max(last_user_update) as last_used
+from ' + @DBName + '.sys.objects a left outer join ' + @DBName + '.sys.dm_db_index_usage_stats b
+on  a.object_id  = b.object_id
+where type_desc IN (' + '''' + 'USER_TABLE' + '''' + ',' + '''' + 'VIEW' + '''' + ',' + '''' + 'SQL_SCALAR_FUNCTION' + '''' + ',' + '''' + 'SQL_STORED_PROCEDURE' + '''' + ',' + '''' +  'SQL_SCALAR_FUNCTION' + '''' + ')
+group by name,create_date,modify_date,type_desc
+order by 4 desc '
+
+exec (@Query1)
+
+
+declare @Query2 nvarchar(Max) 
+set @Query2 = 
+'
+update UnusedObjectlist set last_usedDate = b.last_execution_time
+FROM ' + @DBName + '.sys.objects a left outer join ' + @DBName + '.sys.dm_exec_procedure_stats b 
+on  a.object_id = b.object_id
+join UnusedObjectlist c on a.name collate SQL_Latin1_General_CP1_CI_AS = c.ObjectName
+where a.type_desc=' + '''' + 'SQL_STORED_PROCEDURE' + ''''  + 
+' and b.last_execution_time is not null 
+and c.last_usedDate is null '
+
+exec(@Query2)
+
+set @StartCounter = @StartCounter + 1
+
+end
+
+
+END
+
+select * from UnusedObjectlist
+
+GO
+
+

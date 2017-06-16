@@ -1,0 +1,230 @@
+
+CREATE TABLE #temp (
+       Id INT IDENTITY(1,1), 
+       ParentObject VARCHAR(255),
+       [OBJECT] VARCHAR(255),
+       Field VARCHAR(255),
+       [VALUE] VARCHAR(255)
+)
+ 
+CREATE TABLE #DBCCRes (
+       Id INT IDENTITY(1,1)PRIMARY KEY CLUSTERED, 
+       DBName sysname ,
+       dbccLastKnownGood DATETIME,
+       RowNum	INT
+)
+ 
+DECLARE
+	@DBName SYSNAME,
+	@SQL    VARCHAR(512);
+ 
+DECLARE dbccpage CURSOR
+	LOCAL STATIC FORWARD_ONLY READ_ONLY
+	FOR SELECT name
+		FROM sys.databases
+	WHERE 1 = 1
+		AND STATE = 0
+		--And name NOT IN ('tempdb')
+	;
+ 
+OPEN dbccpage;
+FETCH NEXT FROM dbccpage INTO @DBName;
+WHILE @@FETCH_STATUS = 0
+BEGIN
+	SET @SQL = 'Use [' + @DBName +'];' + CHAR(10)+ CHAR(13)
+	SET @SQL = @SQL + 'DBCC Page ( ['+ @DBName +'],1,9,3) WITH TABLERESULTS;' + CHAR(10)+ CHAR(13)
+ 
+	INSERT INTO #temp
+		EXECUTE (@SQL);
+	SET @SQL = ''
+ 
+	INSERT INTO #DBCCRes
+			( DBName, dbccLastKnownGood,RowNum )
+		SELECT @DBName, VALUE
+				, ROW_NUMBER() OVER (PARTITION BY Field ORDER BY VALUE) AS Rownum
+			FROM #temp
+			WHERE Field = 'dbi_dbccLastKnownGood';
+ 
+	TRUNCATE TABLE #temp;
+ 
+	FETCH NEXT FROM dbccpage INTO @DBName;
+END
+CLOSE dbccpage;
+DEALLOCATE dbccpage;
+ 
+SELECT DBName,dbccLastKnownGood
+	FROM #DBCCRes
+	WHERE RowNum = 1;
+ 
+DROP TABLE #temp
+DROP TABLE #DBCCRes
+
+--------------------------------------------------------
+
+
+USE [master]
+GO
+ 
+IF  EXISTS (SELECT name FROM sys.databases WHERE name = N'TestB')
+DROP DATABASE [TestB]
+GO
+ 
+USE [master]
+GO
+CREATE DATABASE [TestB] 
+GO
+ 
+DECLARE @BackupPath VARCHAR(256)
+	,@BackupName VARCHAR(50)
+SET @BackupPath = 'C:\Database\Backup\' --replace with valid file path
+SET @BackupName = 'TestB.bak'
+ 
+SET @BackupPath = @BackupPath + @BackupName
+BACKUP DATABASE [TestB]
+	TO DISK = @BackupPath
+	WITH init;
+GO
+ 
+CREATE TABLE #temp (
+       Id INT IDENTITY(1,1), 
+       ParentObject VARCHAR(255),
+       [Object] VARCHAR(255),
+       Field VARCHAR(255),
+       [Value] VARCHAR(255)
+)
+ 
+INSERT INTO #temp
+EXECUTE ('DBCC Page ( TestB,1,9,3) WITH TABLERESULTS');
+ 
+/* You will get two results from the following query */
+SELECT *
+	FROM #temp
+	WHERE Field = 'dbi_dbccLastKnownGood';
+ 
+/* TAKE note OF the date returned by the last query */
+ 
+DROP TABLE #temp;
+GO
+ 
+DBCC CHECKDB(TestB) WITH no_infomsgs;
+GO
+ 
+CREATE TABLE #temp (
+       Id INT IDENTITY(1,1), 
+       ParentObject VARCHAR(255),
+       [Object] VARCHAR(255),
+       Field VARCHAR(255),
+       [Value] VARCHAR(255)
+)
+ 
+INSERT INTO #temp
+EXECUTE ('DBCC Page ( TestB,1,9,3) WITH TABLERESULTS');
+ 
+/* You will get two results from the following query */
+SELECT *
+	FROM #temp
+	WHERE Field = 'dbi_dbccLastKnownGood';
+ 
+/* TAKE note OF the date returned by the last query */
+ 
+DROP TABLE #temp;
+GO
+ 
+/* Now Restore the database */
+DECLARE @BackupPath VARCHAR(256)
+	,@BackupName VARCHAR(50)
+SET @BackupPath = 'C:\DATABASE\BACKUP\' --replace with valid file path
+SET @BackupName = 'TestB.bak'
+ 
+SET @BackupPath = @BackupPath + @BackupName
+/* for this contrived example, i will not take a tail log backup
+and just use replace instead */
+ 
+RESTORE DATABASE TestB
+	FROM DISK = @BackupPath
+	WITH REPLACE; 
+GO
+ 
+/* Rerun The Boot Page Check */
+CREATE TABLE #temp (
+       Id INT IDENTITY(1,1), 
+       ParentObject VARCHAR(255),
+       [Object] VARCHAR(255),
+       Field VARCHAR(255),
+       [Value] VARCHAR(255)
+)
+ 
+INSERT INTO #temp
+EXECUTE ('DBCC Page ( TestB,1,9,3) WITH TABLERESULTS');
+ 
+/* You will get two results from the following query */
+SELECT *
+	FROM #temp
+	WHERE Field = 'dbi_dbccLastKnownGood';
+ 
+/* TAKE note OF the date returned by the last query */
+ 
+DROP TABLE #temp;
+GO
+
+--------------------------------------------------------
+
+
+CREATE TABLE #temp (
+       Id INT IDENTITY(1,1), 
+       ParentObject VARCHAR(255),
+       [OBJECT] VARCHAR(255),
+       Field VARCHAR(255),
+       [VALUE] VARCHAR(255)
+)
+ 
+CREATE TABLE #DBCCRes (
+       Id INT IDENTITY(1,1)PRIMARY KEY CLUSTERED, 
+       DBName sysname ,
+       dbccLastKnownGood DATETIME,
+       RowNum	INT
+)
+ 
+DECLARE
+	@DBName SYSNAME,
+	@SQL    VARCHAR(512);
+ 
+DECLARE dbccpage CURSOR
+	LOCAL STATIC FORWARD_ONLY READ_ONLY
+	FOR SELECT name
+		FROM sys.databases
+		WHERE name not in ('tempdb');
+ 
+OPEN dbccpage;
+FETCH NEXT FROM dbccpage INTO @DBName;
+WHILE @@FETCH_STATUS = 0
+BEGIN
+SET @SQL = 'Use [' + @DBName +'];' +CHAR(10)+CHAR(13)
+SET @SQL = @SQL + 'DBCC Page ( ['+ @DBName +'],1,9,3) WITH TABLERESULTS;' +CHAR(10)+CHAR(13)
+ 
+INSERT INTO #temp
+	EXECUTE (@SQL);
+SET @SQL = ''
+ 
+INSERT INTO #DBCCRes
+        ( DBName, dbccLastKnownGood,RowNum )
+	SELECT @DBName, VALUE
+			, ROW_NUMBER() OVER (PARTITION BY Field ORDER BY VALUE) AS Rownum
+		FROM #temp
+		WHERE field = 'dbi_dbccLastKnownGood';
+ 
+TRUNCATE TABLE #temp;
+ 
+FETCH NEXT FROM dbccpage INTO @DBName;
+END
+CLOSE dbccpage;
+DEALLOCATE dbccpage;
+ 
+SELECT DBName,dbccLastKnownGood
+	FROM #DBCCRes
+	WHERE RowNum = 1;
+ 
+DROP TABLE #temp
+DROP TABLE #DBCCRes
+
+

@@ -1,0 +1,225 @@
+/*
+ routines dependancy map visualizer
+ written by Angel Rapallo 2012
+ 
+ prints dependancy map for allroutines
+*/
+
+/*
+ use msdb database for this example
+*/
+use msdb
+
+/*
+ declare some variables
+*/
+declare @objects_name as varchar(255)
+declare @objects_definition as varchar(max)
+declare @objects_type as varchar(3)
+declare @object_id as int
+declare @object_dependency_name as varchar(255)
+declare @object_dependency_type as varchar(3)
+declare @message as varchar(max)
+
+/*
+ normally sql programmers would use the print statement
+ but the print statement only flushes the putput buffer
+ until all statement have run so in order to provide
+ some feed back as the code developes, i use raiserror
+ which returns inmediately, i know is wierd becuase it can make
+ someone not famailiar with it, think i am raising some error
+ but that is the only way.
+*/
+print ''
+raiserror ('msdb dependancy map',0,1) with nowait
+print ''
+
+/*
+ create a cursor for all routines
+ views, table functions, scalar functions,
+ and stored procedures
+*/
+
+raiserror ('building dependancy tree...',0,1) with nowait
+
+declare all_objects cursor static for
+ select
+   x.object_id,
+   x.[name],
+   y.[definition],
+   x.[type]
+ from
+             [msdb].sys.objects x
+  inner join [msdb].sys.sql_modules y  
+  on x.object_id = y.object_id
+ /* i dont think i need to do this checking but just in case */
+ where x.[type]  in ('p','fn','if','v') 
+ order by
+  /*
+   this sorting takes care of dependancy for good
+   becuase the routines which have less dependancy
+   on others and the highest number of dependants
+   allways come first so by the timne a routine gets
+   to be created all its dependancies have been
+   created already
+  */
+  /*
+   sort by the number of routines i point to ascending
+  */
+  (  
+   select count(distinct xxx.object_id)
+   from [msdb].sys.sql_dependencies xxx
+   where
+    x.object_id = xxx.object_id and
+    (
+     select [type]
+     from [msdb].sys.objects zzz
+     where zzz.object_id = xxx.referenced_major_id
+    ) in ('p','fn','if','v','u')    
+  ) asc,  
+  /*
+   sort by the count the number of routines pointing to me   
+   descending. only  views and routines counted
+  */
+  (  
+   select count(distinct xxx.object_id)
+   from [msdb].sys.sql_dependencies xxx
+   where
+    x.object_id = xxx.referenced_major_id and
+    (
+     select [type]
+     from [msdb].sys.objects zzz
+     where zzz.object_id = xxx.object_id
+    ) in ('p','fn','if','v','u')
+  ) desc
+    
+open all_objects
+
+fetch next
+from all_objects
+into
+ @object_id,
+ @objects_name,
+ @objects_definition,
+ @objects_type
+
+/*
+ loop through all routines to gather
+ the dependancy information
+*/
+while (@@fetch_status = 0) begin
+ raiserror(@objects_name ,0,1) with nowait
+
+ raiserror(' routines pointing to me' ,0,1) with nowait
+ 
+ /*
+  create a cursors for all objects which point to me
+  that is which depend on the current routine beeing
+  done. in microsoft terminology objects that reference me
+ */
+ declare objects_pointing_to_me cursor static for
+  select distinct
+   xxx.[name],
+   xxx.[type]
+  from
+   [msdb].sys.objects xxx
+   inner join [msdb].sys.sql_dependencies yyy
+   on
+    xxx.object_id = yyy.object_id and
+    yyy.referenced_major_id = @object_id 
+ 
+ open objects_pointing_to_me
+ fetch next from objects_pointing_to_me
+ into
+  @object_dependency_name,
+  @object_dependency_type
+ 
+ while (@@fetch_status = 0) begin
+  set @message =
+   '  <- ' + @object_dependency_name +
+   replicate('.',60-len(@object_dependency_name)) +
+   case
+    when @object_dependency_type = 'fn' then '(scalar function)'
+    when @object_dependency_type = 'if' then '(table function)'
+    when @object_dependency_type = 'v' then '(view)'
+    when @object_dependency_type = 'p' then '(stored procedure)'
+    when @object_dependency_type = 'u' then '(table)'
+   end   
+
+  raiserror(@message ,0,1) with nowait
+  fetch next from objects_pointing_to_me
+  into
+   @object_dependency_name,
+   @object_dependency_type
+ end
+ 
+ if (@@cursor_rows = 0) begin
+  raiserror('  none' ,0,1) with nowait
+ end
+
+ raiserror('' ,0,1) with nowait
+ 
+ close objects_pointing_to_me
+ deallocate objects_pointing_to_me
+ 
+ raiserror(' routines i point to' ,0,1) with nowait
+ 
+ /*
+  create a cursor for all objects which i point to
+  meanning which i depend on. in microsoft terminology
+  objects i reference.  
+ */
+ declare objects_i_point_to cursor static for
+  select distinct
+   xxx.[name],
+   xxx.[type]
+  from
+   [msdb].sys.objects xxx
+   inner join [msdb].sys.sql_dependencies yyy
+   on
+    xxx.object_id = yyy.referenced_major_id and
+    yyy.object_id = @object_id 
+ 
+ open objects_i_point_to
+ fetch next from objects_i_point_to
+ into
+  @object_dependency_name,
+  @object_dependency_type
+   
+ while (@@fetch_status = 0) begin
+  set @message =
+   '  -> ' + @object_dependency_name + ' ' +
+   replicate('.',60-len(@object_dependency_name)) +
+   case
+    when @object_dependency_type = 'fn' then '(scalar function)'
+    when @object_dependency_type = 'if' then '(table function)'
+    when @object_dependency_type = 'v' then '(view)'
+    when @object_dependency_type = 'p' then '(stored procedure)'
+    when @object_dependency_type = 'u' then '(table)'
+   end   
+  raiserror(@message ,0,1) with nowait
+  fetch next from objects_i_point_to
+  into
+   @object_dependency_name,
+   @object_dependency_type
+ end
+ 
+ if (@@cursor_rows = 0) begin
+  raiserror('  none' ,0,1) with nowait
+ end
+ 
+ close objects_i_point_to
+ deallocate objects_i_point_to
+ 
+ raiserror('' ,0,1) with nowait
+ 
+ fetch next from all_objects
+ into
+  @object_id,
+  @objects_name,
+  @objects_definition,
+  @objects_type
+end
+
+close all_objects
+deallocate all_objects

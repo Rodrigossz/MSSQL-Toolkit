@@ -1,0 +1,58 @@
+/*Get the name of the current default trace file*/ 
+
+DECLARE @filename NVARCHAR(1000)
+
+
+
+SELECT @filename = CAST(value AS NVARCHAR(1000)) 
+FROM sys.fn_trace_getinfo(DEFAULT) 
+WHERE traceid = 1 AND property = 2
+
+
+
+
+/*separate file name into pieces*/
+
+
+DECLARE @bc INT,
+                @ec INT,
+                @bfn VARCHAR(1000),
+                @efn VARCHAR(10)
+
+
+
+SET @filename = REVERSE(@filename)
+
+SET @bc = CHARINDEX('.',@filename)
+
+SET @ec = CHARINDEX('_',@filename)+1
+
+SET @efn = REVERSE(SUBSTRING(@filename,1,@bc))
+
+SET @bfn = REVERSE(SUBSTRING(@filename,@ec,LEN(@filename)))
+
+
+
+/*set filename without rollover number*/ 
+
+SET @filename = @bfn + @efn
+
+
+
+
+
+/*
+get the number of autogrow events in the last hour get the max of data file and log file autogrowths */ 
+
+SELECT MAX(Count_AutoGrow) 
+FROM (SELECT  COUNT(*) 'Count_AutoGrow'
+        
+FROM fn_trace_gettable(@filename, DEFAULT)
+        
+WHERE   (EventClass = 92 OR EventClass = 93) -- Date File Auto-grow, Log File Auto-grow
+     
+AND StartTime > DATEADD(hh, -1, GETDATE())
+                                
+AND DatabaseID = DB_ID()
+GROUP BY DB_NAME(databaseid), [Filename]
+) a

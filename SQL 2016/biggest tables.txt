@@ -1,0 +1,44 @@
+IF EXISTS 
+    (
+	SELECT 1 FROM master.dbo.sysobjects 
+	WHERE name = 'sp_LargestTables' AND type = 'P'
+    )
+DROP PROC sp_LargestTables
+GO
+
+CREATE PROC sp_LargestTables(@n int = NULL,@IsSystemAllowed bit = 0)
+AS
+/*=========================================================================
+CREATE DATE		:	Hari N Sharma
+CREATION DATE		:	10-09-2007
+LAST MODIFICATION DATE	:	11-10-2007
+
+PURPOSE	: To get a list of User/System tables according to their size.
+=========================================================================*/
+
+BEGIN
+	SET NOCOUNT ON
+	DECLARE @LOW int
+	SELECT @LOW = LOW FROM master.dbo.spt_values (NOLOCK) WHERE number = 1 AND type = 'E' 
+
+	IF @n > 0 SET ROWCOUNT @n
+
+	SELECT TableName,[Row Count],[Size (KB)] FROM 
+	(
+		SELECT QUOTENAME(USER_NAME(o.uid)) + '.' + QUOTENAME(OBJECT_NAME(i.id)) AS TableName,SUM(i.rowcnt) [Row Count],
+		CONVERT(numeric(15,2),(((CONVERT(numeric(15,2),SUM(i.reserved)) * @LOW) / 1024.0))) AS [Size (KB)]
+		FROM sysindexes i INNER JOIN sysobjects o (NOLOCK) ON i.id = o.id AND 
+		((@IsSystemAllowed = 1 AND o.type IN ('U', 'S')) OR o.type = 'U') 
+		WHERE	indid IN (0, 1, 255)
+		GROUP BY QUOTENAME(USER_NAME(o.uid)) + '.' + QUOTENAME(OBJECT_NAME(i.id))
+	) AS Z
+	ORDER BY [Size (KB)] DESC
+
+	SET ROWCOUNT 0
+END
+
+GO
+
+
+
+

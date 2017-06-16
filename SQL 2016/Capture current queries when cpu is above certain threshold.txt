@@ -1,0 +1,67 @@
+IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[High_cpu_queries]') AND type in (N'U'))
+CREATE TABLE [dbo].[High_cpu_queries](
+	[Id] [int] IDENTITY(1,1) NOT NULL,
+	[hostname] [sysname] NOT NULL,
+	[dbname] [sysname] NOT NULL,
+	[programname] [varchar](500) NULL,
+	[loginname] [sysname] NOT NULL,
+	[sql_text] [xml] NULL,
+	[blocking_session_id] [int] NULL,
+	[session_id] [int] NULL,
+	[cpu_ms] [bigint] NULL,
+	[MinutesRunning] [int] NULL,
+	[datecreated] [datetime] NULL
+) ON [PRIMARY];
+ 
+CREATE PROCEDURE p_capture_high_cpu_queries (@cpu_limit int = 90)
+AS
+	SET QUOTED_IDENTIFIER ON;
+ 
+	SET NOCOUNT ON;
+ 
+	declare @current_cpu int;
+ 
+	;with cpu_usage (record_id,SystemIdle,SQLProcessUtilization,time_stamp )as
+	 (SELECT 
+			record.value('(./Record/@id)[1]', 'int') AS record_id,
+			record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]', 'int') AS SystemIdle,
+			record.value('(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]', 'int') AS SQLProcessUtilization,
+			TIMESTAMP
+		FROM (
+			SELECT TIMESTAMP, CONVERT(XML, record) AS record 
+			FROM sys.dm_os_ring_buffers with (nolock)
+			WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
+			AND record LIKE '% %') AS x
+			)
+	select Top 1 @current_cpu = SQLProcessUtilization
+	from cpu_usage
+	order by time_stamp desc;
+ 
+	IF @current_cpu > @cpu_limit
+	BEGIN
+		Insert into msdb.dbo.High_cpu_queries(hostname, dbname, programname, loginname, sql_text, blocking_session_id, session_id, cpu_ms, MinutesRunning, datecreated)
+		SELECT
+			S.[host_name], 
+			DB_NAME(R.database_id) as [database_name],
+			(CASE WHEN S.program_name like 'SQLAgent - TSQL JobStep (Job %' THEN  j.name ELSE S.program_name END) as Name , 
+			S.login_name, 
+			cast(('<?query --'+b.text+'--?>') as XML) as sql_text,
+			R.blocking_session_id, 
+			R.session_id,
+			COALESCE(R.CPU_time, S.CPU_time) AS CPU_ms,
+			isnull(DATEDIFF(mi, S.last_request_start_time, getdate()), 0) [MinutesRunning],
+			GETDATE()
+		FROM sys.dm_exec_requests R with (nolock)
+		INNER JOIN sys.dm_exec_sessions S with (nolock)
+			ON R.session_id = S.session_id
+		OUTER APPLY sys.dm_exec_sql_text(R.sql_handle) b
+		OUTER APPLY sys.dm_exec_query_plan (R.plan_handle) AS qp
+		LEFT OUTER JOIN msdb.dbo.sysjobs J with (nolock)
+			ON (substring(left(j.job_id,8),7,2) +
+				substring(left(j.job_id,8),5,2) +
+				substring(left(j.job_id,8),3,2) +
+				substring(left(j.job_id,8),1,2))  = substring(S.program_name,32,8)
+		WHERE R.session_id <> @@SPID
+			and S.[host_name] IS NOT NULL
+		ORDER BY s.[host_name],S.login_name;
+	END

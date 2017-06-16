@@ -1,0 +1,5 @@
+create table #dbcclogspace([Database Name] nvarchar(200),[Log Size (MB)] float,[Log Space Used (%)] float,[Status] int)
+     insert into #dbcclogspace([Database Name],[Log Size (MB)],[Log Space Used (%)],[Status])
+      exec('DBCC sqlperf(logspace)')
+     select [Database Name],([Log Space Used (%)]*[Log Size (MB)])/100 as [LogBackupSize in MB],(([Log Space Used (%)]*[Log Size (MB)])/100)/1024 as [LogBackupSize in GB] from #dbcclogspace
+     drop table #dbcclogspace

@@ -1,0 +1,9 @@
+select 
+ BackupDate = convert(varchar(10),backup_start_date, 111) 
+ ,SizeInGigs=floor( backup_size/1024000000) 
+from msdb..backupset 
+where 
+ database_name = 'DatabaseName'
+ and type = 'd'
+order by 
+ backup_start_date desc

@@ -1,0 +1,179 @@
+CREATE SCHEMA Maintenance;
+GO
+/*
+This view shows the server's suggestions for missing indexes that
+should be created to improve performance based on actual
+queries executed.
+The formula for potential_user_benefit came straight from the
+SQL Server Books Online documentation for the index-related
+dynamic management view sys.dm_db_missing_index_group_stats:
+http://msdn.microsoft.com/en-us/library/ms345421.aspx
+I don't completely understand it, but it seems to work.
+*/
+CREATE VIEW Maintenance.missing_indexes
+AS
+SELECT mid.index_handle,
+    mid.database_id,
+    mid.statement,
+    mid.equality_columns,
+    mid.inequality_columns,
+    mid.included_columns,
+    migs.user_seeks,
+    migs.user_scans,
+    migs.avg_total_user_cost,
+    migs.avg_user_impact,
+    migs.avg_total_user_cost * migs.avg_user_impact *
+    (migs.user_seeks + migs.user_scans) AS potential_user_benefit
+  FROM sys.dm_db_missing_index_details AS mid
+    INNER JOIN sys.dm_db_missing_index_groups AS mig
+      ON mid.index_handle = mig.index_handle
+    INNER JOIN sys.dm_db_missing_index_group_stats AS migs
+      ON mig.index_group_handle = migs.group_handle
+  WHERE (mid.database_id = DB_ID())
+GO
+SELECT TOP 10 *
+  FROM Maintenance.missing_indexes
+  ORDER BY potential_user_benefit DESC;
+
+-- return the maximum of 3 dates
+CREATE FUNCTION Maintenance.max3datetimes
+(
+ @value1 DATETIME,
+ @value2 DATETIME,
+ @value3 DATETIME
+)
+RETURNS DATETIME
+AS
+BEGIN
+  DECLARE @value DATETIME;
+  SELECT @value = MAX(value)
+    FROM (SELECT @value1 value
+          UNION
+          SELECT @value2 value
+          UNION
+          SELECT @value3 value) AS allvalues;
+  RETURN @value;
+END;
+GO
+/*
+This view shows all non-unique indexes in the current database
+and how much they have been used.
+Indexes are selected for dropping by considering how long it has
+been since they were last read and by comparing the number of
+reads to the number of writes.
+*/
+CREATE VIEW Maintenance.droppable_indexes
+AS
+SELECT schemas.name AS schema_name,
+    tables.name AS object_name,
+    indexes.name AS index_name,
+    ISNULL(ius.user_seeks + ius.user_scans +
+           ius.user_lookups - ius.user_updates, 0) AS usefulness,
+    Maintenance.max3datetimes(ius.last_user_seek,
+                              ius.last_user_scan,
+                              ius.last_user_lookup) AS last_user_read,
+    ius.last_user_update
+  FROM sys.schemas AS schemas
+    INNER JOIN sys.tables AS tables
+      ON schemas.schema_id = tables.schema_id
+    INNER JOIN sys.indexes AS indexes
+      ON tables.object_id = indexes.object_id
+    LEFT OUTER JOIN sys.dm_db_index_usage_stats AS ius
+      ON ius.database_id = DB_ID() AND
+         indexes.object_id = ius.object_id AND
+         indexes.index_id = ius.index_id
+  WHERE (indexes.is_unique = 0)
+GO
+-- find the most-written-to and least-read-from indexes
+SELECT TOP 10 *
+  FROM Maintenance.droppable_indexes
+  ORDER BY usefulness;
+-- find the least-recently-used indexes
+SELECT TOP 10 *
+  FROM Maintenance.droppable_indexes
+  ORDER BY last_user_read;
+		
+CREATE FUNCTION Maintenance.missing_index_name (@index_handle INT)
+RETURNS SYSNAME
+AS
+BEGIN;
+  DECLARE @index_name SYSNAME;
+  SELECT @index_name = 'IX_' + obj.name
+    FROM sys.objects AS obj
+      INNER JOIN sys.dm_db_missing_index_details AS mid
+        ON obj.object_id = mid.object_id
+    WHERE (mid.index_handle = @index_handle) AND
+      (mid.database_id = DB_ID());
+  SELECT @index_name = @index_name +
+      CASE WHEN column_usage = 'INCLUDE' THEN '#'
+           ELSE '_'
+      END + column_name
+    FROM sys.dm_db_missing_index_columns(@index_handle);
+  RETURN @index_name;
+END;
+GO
+/*
+This procedure creates the missing index that should
+have the most performance impact on the server.
+*/
+CREATE PROCEDURE Maintenance.create_index
+AS
+BEGIN;
+  DECLARE --
+    @object_name SYSNAME,
+    @index_name SYSNAME,
+    @equality_columns NVARCHAR(4000),
+    @inequality_columns NVARCHAR(4000),
+    @included_columns NVARCHAR(4000),
+    @SQL NVARCHAR(4000);
+  SELECT TOP (1) --
+      @object_name = statement,
+      @index_name = Maintenance.missing_index_name(index_handle),
+      @equality_columns = equality_columns,
+      @inequality_columns = inequality_columns,
+      @included_columns = included_columns
+    FROM Maintenance.missing_indexes
+    ORDER BY potential_user_benefit DESC;
+  IF @@ROWCOUNT > 0
+    BEGIN;
+      SELECT @SQL = 'CREATE INDEX ' + QUOTENAME(@index_name) +
+          ' ON ' + @object_name + ' (' +
+          COALESCE(@equality_columns + ', ' +
+                   @inequality_columns, @equality_columns,
+                   @inequality_columns) + ')' +
+          ISNULL(' INCLUDE (' + @included_columns + ')', '');
+      PRINT @SQL;
+      EXEC (@SQL);
+    END;
+END;
+GO
+/*
+This procedure finds the least used non-unique index
+in the current database with the most overhead and drops it.
+*/
+CREATE PROCEDURE Maintenance.drop_index
+AS
+BEGIN;
+  DECLARE --
+    @schema_name SYSNAME,
+    @object_name SYSNAME,
+    @index_name SYSNAME,
+    @SQL NVARCHAR(4000);
+  SELECT TOP (1) --
+      @schema_name = schema_name,
+      @object_name = object_name,
+      @index_name = index_name
+    FROM Maintenance.droppable_indexes
+    ORDER BY last_user_read,
+      usefulness;
+  IF @@ROWCOUNT > 0
+    BEGIN;
+      SELECT @SQL = 'DROP INDEX ' + QUOTENAME(@index_name) +
+          ' ON ' + QUOTENAME(@schema_name) + '.' +
+          QUOTENAME(@object_name) + ';';
+      PRINT @SQL;
+      EXEC (@SQL);
+    END;
+END;
+GO
+				

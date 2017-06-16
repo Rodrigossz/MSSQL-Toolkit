@@ -1,0 +1,551 @@
+
+
+Creating the Database
+Let's start by creating the database to store this data, if you don't already have one. Please note that in Listing 1 you may need to change location, file size and file growth settings, as appropriate for your environment, and that you will need to back up the database on a regular basis.
+
+USE [master];
+GO
+
+CREATE DATABASE [BaselineData] ON PRIMARY 
+( NAME = N'BaselineData', 
+  FILENAME = N'M:\UserDBs\BaselineData.mdf', 
+  SIZE = 512MB, 
+  FILEGROWTH = 512MB
+) LOG ON 
+( NAME = N'BaselineData_log', 
+  FILENAME = N'M:\UserDBs\BaselineData_log.ldf', 
+  SIZE = 128MB, 
+  FILEGROWTH = 512MB
+);
+
+ALTER DATABASE [BaselineData] SET RECOVERY SIMPLE;
+Listing 1: Database to store baseline performance data
+
+Collecting Configuration Data (sys.configurations)
+As discussed in my previous post, one of the keys to successful baselining is to start small. The simplest information to gather regularly is configuration information, which is stored in the sys.configurations catalog view. This view lists numerous settings, such as minimum and maximum memory, max degree of parallelism, and whether or not xp_cmdshell is enabled. By logging the contents of this view to a table, on a regular basis, we capture a history of the instance configuration settings, allowing you to detect easily if a setting has changed. This view can't tell us who changed the setting, we need to review the ERRORLOG or default trace to find the culprit, but we will know that something changed. Conversely, we'll be able to prove that a setting has not changed, which is often an equally valuable facet of troubleshooting. While configuration baselines may seem mundane, they can quickly rule out what is not the problem.
+
+Listing 2 creates our ConfigData table, in which we'll store this information.
+
+USE [BaselineData];
+GO
+
+SET ANSI_NULLS ON;
+GO
+
+SET QUOTED_IDENTIFIER ON;
+GO
+
+IF NOT EXISTS ( SELECT  *
+                FROM    [sys].[tables]
+                WHERE   [name] = N'ConfigData'
+                        AND [type] = N'U' ) 
+    CREATE TABLE [dbo].[ConfigData]
+        (
+          [ConfigurationID] [int] NOT NULL ,
+          [Name] [nvarchar](35) NOT NULL ,
+          [Value] [sql_variant] NULL ,
+          [ValueInUse] [sql_variant] NULL ,
+          [CaptureDate] [datetime]
+        )
+    ON  [PRIMARY];
+GO
+
+CREATE CLUSTERED INDEX CI_ConfigData ON [dbo].[ConfigData] ([CaptureDate],[ConfigurationID]);
+Listing 2: Create the ConfigData table
+
+Next, we'll need to set up a job to log the settings to the dbo.ConfigData table, regularly. Presumably, the configuration of your instance will not change frequently, so running the job once a day is probably all that's needed. Include in your job the statement in Listing 3, to log the settings.
+
+USE [BaselineData];
+GO
+
+INSERT  INTO [dbo].[ConfigData]
+        ( [ConfigurationID] ,
+          [Name] ,
+          [Value] ,
+          [ValueInUse] ,
+          [CaptureDate]
+        )
+        SELECT  [configuration_id] ,
+                [name] ,
+                [value] ,
+                [value_in_use] ,
+                GETDATE()
+        FROM    [sys].[configurations];
+Listing 3: Statement to collect and log configuration data, within a scheduled job
+
+You might find it useful to quickly compare a "snapshot" of the values captured on day x, with those captured on day y in order to see what changed between the two dates. For the two dates provided, the dbo.usp_SysConfigReport stored procedure in Listing 4 will output the values for all settings where the values changes between the two dates. If it returns no rows, then no settings have changed.
+
+USE [BaselineData];
+GO
+
+IF OBJECTPROPERTY(OBJECT_ID(N'usp_SysConfigReport'), 'IsProcedure') = 1 
+    DROP PROCEDURE usp_SysConfigReport;
+GO
+
+CREATE PROCEDURE dbo.usp_SysConfigReport
+    (
+      @OlderDate DATETIME ,
+      @RecentDate DATETIME
+    )
+AS 
+    BEGIN;
+
+        IF @RecentDate IS NULL
+            OR @OlderDate IS NULL 
+            BEGIN;
+                RAISERROR(N'Input parameters cannot be NULL', 16, 1);
+                RETURN;
+            END;
+
+        SELECT  [O].[Name] ,
+                [O].[Value] AS "OlderValue" ,
+                [O].[ValueInUse] AS "OlderValueInUse" ,
+                [R].[Value] AS "RecentValue" ,
+                [R].[ValueInUse] AS "RecentValueInUse"
+        FROM    [dbo].[ConfigData] O
+                JOIN ( SELECT   [ConfigurationID] ,
+                                [Value] ,
+                                [ValueInUse]
+                       FROM     [dbo].[ConfigData]
+                       WHERE    [CaptureDate] = @RecentDate
+                     ) R ON [O].[ConfigurationID] = [R].[ConfigurationID]
+        WHERE   [O].[CaptureDate] = @OlderDate
+                AND ( ( [R].[Value] <> [O].[Value] )
+                      OR ( [R].[ValueInUse] <> [O].[ValueInUse] )
+                    )
+    END;
+Listing 4: The dbo.usp_SysConfigReport stored procedure
+
+In Listing 5, we retrieve a list of valid dates and then use two of them to execute the stored procedure, entering the older date as the first input:
+
+USE [BaselineData];
+GO
+SELECT DISTINCT
+        [CaptureDate]
+FROM    [dbo].[ConfigData]
+ORDER BY [CaptureDate];
+
+EXEC dbo.usp_SysConfigReport '2012-08-02 14:09:56.290',
+    '2012-08-24 14:10:41.963';
+Listing 5: Return a list of valid dates, and then execute the stored procedure
+
+An additional benefit of capturing this information is that we can review and verify the current settings. It is outside the scope of this article to review each setting and highlight potential problems but, for example, you'll want to ensure that the value for max server memory (MB) is less than the total memory on the server (see http://sqlskills.com/blogs/jonathan/post/How-much-memory-does-my-SQL-Server-actually-need.aspx for further details).
+
+Collecting Server and Instance Data (SERVERPROPERTY)
+Capturing the configuration settings is a good start, but we still have work to do. Using the SERVERPROPERTY built-in function, we can capture more information about the instance, as well as some server data. Again, typically, this information does not change, but it can be very helpful in the event of cluster failovers and patching. For example, the output from SERVERPROPERTY includes ComputerNamePhysicalNetBios, which is the name of the computer on which the SQL Server instance is currently running. If we haven't configured Failover Clustering, this value does not change, but for a clustered implementation, the value does change whenever a failover occurs. The ProductVersion option lists the SQL Server version as major.minor.build.revision. The best way to check to see if service packs, cumulative updates or hotfixes have been applied is to utilize ProductVersion. Ideally, DBAs are always aware of cluster failovers or version changes, but capturing data from SERVERPROPERTY allows definitive verification and, at times, we can use it to confirm the factors that we can rule out.
+
+Listing 6 create a ServerConfig table, in which to store the server information.
+
+USE BaselineData;
+GO
+
+IF NOT EXISTS ( SELECT  *
+                FROM    [sys].[tables]
+                WHERE   [name] = N'ServerConfig'
+                        AND [type] = N'U' ) 
+    CREATE TABLE [dbo].[ServerConfig]
+        (
+          [Property] NVARCHAR(128) ,
+          [Value] SQL_VARIANT ,
+          [CaptureDate] DATETIME
+        );
+GO
+
+CREATE CLUSTERED INDEX CI_ServerConfig ON [dbo].[ServerConfig]   ([CaptureDate],[Property]);
+Listing 6: Create the ServerConfig table
+
+For the configuration information, we need to create a job to log regularly the settings to the dbo.ServerConfig table. Since we need to collect this data on roughly the same schedule as for the configuration data (i.e. daily), we can simply append the code in Listing 7 to the same job.
+
+USE BaselineData;
+GO
+
+SET NOCOUNT ON;
+
+BEGIN TRANSACTION;
+INSERT  INTO [dbo].[ServerConfig]
+        ( [Property] ,
+          [Value]
+        )
+        EXEC xp_instance_regread N'HKEY_LOCAL_MACHINE',
+            N'HARDWARE\DESCRIPTION\System\CentralProcessor\0',
+            N'ProcessorNameString';
+UPDATE  [dbo].[ServerConfig]
+SET     [CaptureDate] = GETDATE()
+WHERE   [Property] = N'ProcessorNameString'
+        AND [CaptureDate] IS NULL;
+COMMIT;
+
+INSERT  INTO [dbo].[ServerConfig]
+        ( [Property] ,
+          [Value] ,
+          [CaptureDate]
+        )
+        SELECT  N'MachineName' ,
+                SERVERPROPERTY('MachineName') ,
+                GETDATE();
+INSERT  INTO [dbo].[ServerConfig]
+        ( [Property] ,
+          [Value] ,
+          [CaptureDate]
+        )
+        SELECT  N'ServerName' ,
+                SERVERPROPERTY('ServerName') ,
+                GETDATE();
+INSERT  INTO [dbo].[ServerConfig]
+        ( [Property] ,
+          [Value] ,
+          [CaptureDate]
+        )
+        SELECT  N'InstanceName' ,
+                SERVERPROPERTY('InstanceName') ,
+                GETDATE();
+INSERT  INTO [dbo].[ServerConfig]
+        ( [Property] ,
+          [Value] ,
+          [CaptureDate]
+        )
+        SELECT  N'IsClustered' ,
+                SERVERPROPERTY('IsClustered') ,
+                GETDATE();
+INSERT  INTO [dbo].[ServerConfig]
+        ( [Property] ,
+          [Value] ,
+          [CaptureDate]
+        )
+        SELECT  N'ComputerNamePhysicalNetBios' ,
+                SERVERPROPERTY('ComputerNamePhysicalNetBIOS') ,
+                GETDATE();
+INSERT  INTO [dbo].[ServerConfig]
+        ( [Property] ,
+          [Value] ,
+          [CaptureDate]
+        )
+        SELECT  N'Edition' ,
+                SERVERPROPERTY('Edition') ,
+                GETDATE();
+INSERT  INTO [dbo].[ServerConfig]
+        ( [Property] ,
+          [Value] ,
+          [CaptureDate]
+        )
+        SELECT  N'ProductLevel' ,
+                SERVERPROPERTY('ProductLevel') ,
+                GETDATE();
+INSERT  INTO [dbo].[ServerConfig]
+        ( [Property] ,
+          [Value] ,
+          [CaptureDate]
+        )
+        SELECT  N'ProductVersion' ,
+                SERVERPROPERTY('ProductVersion') ,
+                GETDATE();
+
+DECLARE @TRACESTATUS TABLE
+    (
+      [TraceFlag] SMALLINT ,
+      [Status] BIT ,
+      [Global] BIT ,
+      [Session] BIT
+    );
+
+INSERT  INTO @TRACESTATUS
+        EXEC ( 'DBCC TRACESTATUS (-1)'
+            );
+
+IF ( SELECT COUNT(*)
+     FROM   @TRACESTATUS
+   ) > 0 
+    BEGIN;
+        INSERT  INTO [dbo].[ServerConfig]
+                ( [Property] ,
+                  [Value] ,
+                  [CaptureDate]
+                )
+                SELECT  N'DBCC_TRACESTATUS' ,
+                        'TF ' + CAST([TraceFlag] AS VARCHAR(5))
+                        + ': Status = ' + CAST([Status] AS VARCHAR(1))
+                        + ', Global = ' + CAST([Global] AS VARCHAR(1))
+                        + ', Session = ' + CAST([Session] AS VARCHAR(1)) ,
+                        GETDATE()
+                FROM    @TRACESTATUS
+                ORDER BY [TraceFlag];
+    END;
+ELSE 
+    BEGIN;
+        INSERT  INTO [dbo].[ServerConfig]
+                ( [Property] ,
+                  [Value] ,
+                  [CaptureDate]
+                )
+                SELECT  N'DBCC_TRACESTATUS' ,
+                        'No trace flags enabled' ,
+                        GETDATE()
+    END;
+Listing 7: Logging Server configuration data
+
+All we need now is a stored procedure that will allow us to review the data captured for the available properties (listed within the procedure).
+
+USE [BaselineData];
+GO
+
+IF OBJECTPROPERTY(OBJECT_ID(N'usp_ServerConfigReport'), 'IsProcedure') = 1 
+    DROP PROCEDURE usp_ServerConfigReport;
+GO
+
+CREATE PROCEDURE dbo.usp_ServerConfigReport
+    (
+      @Property NVARCHAR(128) = NULL
+    )
+AS 
+    BEGIN;
+        IF @Property NOT IN ( N'ComputerNamePhysicalNetBios',
+                              N'DBCC_TRACESTATUS', N'Edition',
+                              N'InstanceName',
+                              N'IsClustered', N'MachineName',
+                              N'ProcessorNameString', N'ProductLevel',
+                              N'ProductVersion', N'ServerName' ) 
+            BEGIN;
+                RAISERROR(N'Valid values for @Property are:
+                            ComputerNamePhysicalNetBios, DBCC_TRACESTATUS,
+                            Edition, InstanceName, IsClustered,
+                            MachineName, ProcessorNameString,
+                            ProductLevel, ProductVersion, or ServerName',
+                         16, 1);
+                RETURN;
+            END;
+
+        SELECT  *
+        FROM    [dbo].[ServerConfig]
+        WHERE   [Property] = ISNULL(@Property, Property)
+        ORDER BY [Property] ,
+                [CaptureDate]
+    END;
+Listing 8: Creating the dbo.usp_ServerConfigReport stored procedure
+
+We can execute the stored procedure without any input parameters, which will return all rows, or we can return values for a specific property.
+
+-- return all rows
+EXEC dbo.usp_ServerConfigReport
+-- return information for a specific property
+EXEC dbo.usp_ServerConfigReport N'ComputerNamePhysicalNetBios'
+Listing 9: Executing the dbo.usp_ServerConfigReport stored procedure
+
+Collecting Performance Data
+Baseline data becomes extremely useful when troubleshooting performance issues and the SQL Server DMVs provide a wealth of information. For example, we can retrieve SQL Server counter information from the sys.dm_os_performance_counter DMV. There are numerous counters from which to choose, and the scripts here will log only a select few. Simply review the counters captured and tweak them as you see fit, so that you capture the set most relevant for your environment. Again, a review of all the counters, and the expected or recommended value for each, is outside the scope of this article.
+
+Listing 10 creates a log table for the counters.
+
+USE [BaselineData];
+GO
+SET ANSI_NULLS ON;
+GO
+SET QUOTED_IDENTIFIER ON;
+GO
+IF NOT EXISTS ( SELECT  *
+                FROM    [sys].[tables]
+                WHERE   [name] = N'PerfMonData'
+                        AND [type] = N'U' ) 
+    CREATE TABLE [dbo].[PerfMonData]
+        (
+          [Counter] NVARCHAR(770) ,
+          [Value] DECIMAL(38, 2) ,
+          [CaptureDate] DATETIME,
+        )
+    ON  [PRIMARY];
+GO
+
+CREATE CLUSTERED INDEX CI_PerfMonData ON [dbo].[PerfMonData] ([CaptureDate],[Counter]);
+
+CREATE NONCLUSTERED INDEX IX_PerfMonData ON [dbo].[PerfMonData] ([Counter], [CaptureDate]) INCLUDE ([Value]);
+Listing 10: Create the PerfMonData logging table
+
+Look out for the following warnings when you create the indexes:
+
+Warning! The maximum key length is 900 bytes. The index 'CI_PerfMonData' has maximum length of 1548 bytes. For some combination of large values, the insert/update operation will fail.
+Warning! The maximum key length is 900 bytes. The index 'IX_PerfMonData' has maximum length of 1548 bytes. For some combination of large values, the insert/update operation will fail.
+SQL Server issues these warnings because the data type for the Counter column is nvarchar and can consume up to 1540 bytes. By design, the column can handle the maximum sizes of the object_name, counter_name and instance_name columns concatenated (from sys.dm_os_performance_counters). Local testing did not find any occurrences of a maximum length above 900 bytes, but if this occurs in your environment then you will need to truncate the columns when capturing them.
+
+Create a new job to execute the script in Listing 11, which logs the counters to the dbo.PerfMonData table. Due to the nature of some counters, a delay is hard-coded into the script so that it can capture two samples of the counter, and then calculate the required counter value. The delay is currently 10 seconds, but you can adjust this as desired. To better understand the different counter types and how they are calculated, please see Amit Banerjee's post, What does cntr_type mean?, or Chapter 7 of the book Performance Tuning with SQL Server Dynamic Management Views, by Louis Davidson and Tim Ford (available as a free eBook).
+
+We need to capture performance counters more frequently than configuration information (e.g. every 1, 5 or 10 minutes). Realize, though, that there is a tradeoff between frequency of collection and quantity of data. The more frequently we collect the data, the more granular our information, which may be useful when troubleshooting or identifying trends. However, this also creates more data and may be more unwieldy to manage. When deciding how frequently to log the data to a table, consider how often you will utilize this information and how long you plan to keep it. Every five minutes is typically a good place to start.
+
+USE [BaselineData];
+GO
+
+SET NOCOUNT ON;
+
+DECLARE @PerfCounters TABLE
+    (
+      [Counter] NVARCHAR(770) ,
+      [CounterType] INT ,
+      [FirstValue] DECIMAL(38, 2) ,
+      [FirstDateTime] DATETIME ,
+      [SecondValue] DECIMAL(38, 2) ,
+      [SecondDateTime] DATETIME ,
+      [ValueDiff] AS ( [SecondValue] - [FirstValue] ) ,
+      [TimeDiff] AS ( DATEDIFF(SS, FirstDateTime, SecondDateTime) ) ,
+      [CounterValue] DECIMAL(38, 2)
+    );
+
+INSERT  INTO @PerfCounters
+        ( [Counter] ,
+          [CounterType] ,
+          [FirstValue] ,
+          [FirstDateTime]
+        )
+        SELECT  RTRIM([object_name]) + N':' + RTRIM([counter_name]) + N':'
+                + RTRIM([instance_name]) ,
+                [cntr_type] ,
+                [cntr_value] ,
+                GETDATE()
+        FROM    sys.dm_os_performance_counters
+        WHERE   [counter_name] IN ( N'Page life expectancy',
+                                    N'Lazy writes/sec', N'Page reads/sec',
+                                    N'Page writes/sec', N'Free Pages',
+                                    N'Free list stalls/sec',
+                                    N'User Connections',
+                                    N'Lock Waits/sec',
+                                    N'Number of Deadlocks/sec',
+                                    N'Transactions/sec',
+                                    N'Forwarded Records/sec',
+                                    N'Index Searches/sec',
+                                    N'Full Scans/sec',
+                                    N'Batch Requests/sec',
+                                    N'SQL Compilations/sec',
+                                    N'SQL Re-Compilations/sec',
+                                    N'Total Server Memory (KB)',
+                                    N'Target Server Memory (KB)',
+                                    N'Latch Waits/sec' )
+        ORDER BY [object_name] + N':' + [counter_name] + N':'
+                + [instance_name];
+
+WAITFOR DELAY '00:00:10';
+
+UPDATE  @PerfCounters
+SET     [SecondValue] = [cntr_value] ,
+        [SecondDateTime] = GETDATE()
+FROM    sys.dm_os_performance_counters
+WHERE   [Counter] = RTRIM([object_name]) + N':' + RTRIM([counter_name])
+                                                                  + N':'
+        + RTRIM([instance_name])
+        AND [counter_name] IN ( N'Page life expectancy', 
+                                N'Lazy writes/sec',
+                                N'Page reads/sec', N'Page writes/sec',
+                                N'Free Pages', N'Free list stalls/sec',
+                                N'User Connections', N'Lock Waits/sec',
+                                N'Number of Deadlocks/sec',
+                                N'Transactions/sec',
+                                N'Forwarded Records/sec',
+                                N'Index Searches/sec', N'Full Scans/sec',
+                                N'Batch Requests/sec',
+                                N'SQL Compilations/sec',
+                                N'SQL Re-Compilations/sec',
+                                N'Total Server Memory (KB)',
+                                N'Target Server Memory (KB)',
+                                N'Latch Waits/sec' );
+
+UPDATE  @PerfCounters
+SET     [CounterValue] = [ValueDiff] / [TimeDiff]
+WHERE   [CounterType] = 272696576;
+
+UPDATE  @PerfCounters
+SET     [CounterValue] = [SecondValue]
+WHERE   [CounterType] <> 272696576;
+
+INSERT  INTO [dbo].[PerfMonData]
+        ( [Counter] ,
+          [Value] ,
+          [CaptureDate]
+        )
+        SELECT  [Counter] ,
+                [CounterValue] ,
+                [SecondDateTime]
+        FROM    @PerfCounters;
+Listing 11: Logging Performance Counter data
+
+Once the job is executing regularly, we can review the information with the stored procedure in Listing 12.
+
+USE [BaselineData];
+GO
+IF OBJECTPROPERTY(OBJECT_ID(N'usp_PerfMonReport'), 'IsProcedure') = 1 
+    DROP PROCEDURE usp_PerfMonReport;
+GO
+CREATE PROCEDURE dbo.usp_PerfMonReport
+    (
+      @Counter NVARCHAR(128) = N'%'
+    )
+AS 
+    BEGIN;
+        SELECT  *
+        FROM    [dbo].[PerfMonData]
+        WHERE   [Counter] LIKE @Counter
+        ORDER BY [Counter] ,
+                [CaptureDate]
+    END;
+Listing 12: Creating the dbo.usp_PerfMonReport stored procedure
+
+The stored procedure will return all the data in the table, or information for only one counter based on the input.
+
+-- return information all counters 
+EXEC dbo.usp_PerfMonReport 
+
+-- return information for a specific counter
+EXEC dbo.usp_PerfMonReport N'%Page life expectancy%'
+Listing 13: Returning performance counter data
+
+Purging Historical Data
+Over time, we'll accumulate a high quantity of data and we should not forget to purge it, periodically. It is up to you to decide how long to keep the data, and you can keep the configuration information for longer than performance data, as there is less information overall and it is not captured as frequently.
+
+The PurgeOldData stored procedure in Listing 14 accepts two input values, which represent the number of days' worth of data to keep, for configuration and performance counter data, respectively.
+
+USE [BaselineData];
+GO
+
+IF OBJECTPROPERTY(OBJECT_ID(N'usp_PurgeOldData'), 'IsProcedure') = 1 
+    DROP PROCEDURE usp_PurgeOldData;
+GO
+
+CREATE PROCEDURE dbo.usp_PurgeOldData
+    (
+      @PurgeConfig SMALLINT ,
+      @PurgeCounters SMALLINT
+    )
+AS 
+    BEGIN;
+        IF @PurgeConfig IS NULL
+            OR @PurgeCounters IS NULL 
+            BEGIN;
+                RAISERROR(N'Input parameters cannot be NULL', 16, 1);
+                RETURN;
+            END;
+        DELETE  FROM [dbo].[ConfigData]
+        WHERE   [CaptureDate] < GETDATE() - @PurgeConfig;
+
+        DELETE  FROM [dbo].[ServerConfig]
+        WHERE   [CaptureDate] < GETDATE() - @PurgeConfig;
+
+        DELETE  FROM [dbo].[PerfMonData]
+        WHERE   [CaptureDate] < GETDATE() - @PurgeCounters;
+    END;
+Listing 14: Purging old data
+
+To retain the last 30 days of configuration information, and the last 7 days of performance counter information, execute:
+
+  EXEC dbo.usp_PurgeOldData 30, 7
+Final Notes
+The scripts in this article are for SQL Server 2005 and higher and represent only the beginning of the baseline information it's possible to capture about a system. Feel free to tailor and expand upon these scripts as needed for your solutions. Be sure to include all of these tables in your regular index maintenance. In particular, the non-clustered index on the dbo.PerfMonData table will fragment rapidly, but exists to optimize reporting on the performance counters.
+
+This article is only the second in a series of four on capturing baseline data – there is much more that we can do! The next article will cover methods for capturing file and database sizing information, as we continue to build a baseline foundation that you can then adapt for your environment.
+
+Thank this author by sharing:Share on linkedin Share on facebook Share on twitter More Sharing Services
+9
+       Rate this    Join the discussion    Add to briefcase    Print
+Total article views: 1960 | Views in the last 30 days: 1960
+ 	
+Tags
+baselines    
+ 
+
+ 	
+Copyright © 2002-2012 Simple Talk Publishing. All Rights Reserved. Privacy Policy. Terms of Use. Report Abuse.
+ 
