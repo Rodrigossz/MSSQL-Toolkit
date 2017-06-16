@@ -1,0 +1,6 @@
+select [Server], [Orphaned Logins]
+  
+FROM OPENDATASOURCE('Microsoft.Jet.OLEDB.4.0',
+  'Data Source=C:\temp\invalidlogins.xls;Extended Properties=Excel 8.0')...[Sheet1$]
+
+order by [Orphaned Logins] asc

@@ -1,0 +1,310 @@
+<?xml version="1.0"?>
+<SqlWorkbenchSqlProject xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" Name="DBA">
+  <Items>
+    <LogicalFolder Name="Connections" Type="2" Sorted="true">
+      <Items />
+    </LogicalFolder>
+    <LogicalFolder Name="Queries" Type="0" Sorted="true">
+      <Items>
+        <FileNode Name="Config - Arquivo txt Bkp ok.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>Config - Arquivo txt Bkp ok.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Config - Cdc ClienteDB FidelidadeDb.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>Config - Cdc ClienteDB FidelidadeDb.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Config - Cdc Psafedb.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>Config - Cdc Psafedb.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Config - Grants ClienteDb.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>Config - Grants ClienteDb.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Config - Grants Master.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>Config - Grants Master.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Config - Indices GXC.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>Config - Indices GXC.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Config - Indices ODS.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>Config - Indices ODS.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Config - Procs Generator.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>Config - Procs Generator.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Config - Restore database encryptado.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>Config - Restore database encryptado.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Config - Server GXC.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>Config - Server GXC.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Config - Server ODS.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>Config - Server ODS.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Config - TDE Prod.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>Config - TDE Prod.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Config - TDE.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>Config - TDE.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Config - sp_dba_failoverLogShipping GXC.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>Config - sp_dba_failoverLogShipping GXC.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Config - sp_dba_failoverLogShipping ODS.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>Config - sp_dba_failoverLogShipping ODS.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DDL - Alter User - change users login.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>DDL - Alter User - change users login.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DDL - Clientedb procs nao padrao.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>DDL - Clientedb procs nao padrao.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DDL - Commondb procs nao padrao.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>DDL - Commondb procs nao padrao.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DDL - Create Type - tdGuId.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>DDL - Create Type - tdGuId.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DDL - Fidelidadedb procs nao padrao.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>DDL - Fidelidadedb procs nao padrao.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DDL - Master.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>DDL - Master.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DDL - Model.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>DDL - Model.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DDL - Msdb.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>DDL - Msdb.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DDL - PSafedb procs nao padrao.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>DDL - PSafedb procs nao padrao.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DDL - Views do PsafeDb.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>DDL - Views do PsafeDb.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DDL - sp_dba_ReorgRebuildIndexes.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>DDL - sp_dba_ReorgRebuildIndexes.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DDL - sp_dba_ReorgRebuildIndexes_NEW.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>DDL - sp_dba_ReorgRebuildIndexes_NEW.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DDL - system procs (sp_dba_IndexUsage).sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>DDL - system procs (sp_dba_IndexUsage).sql</FullPath>
+        </FileNode>
+        <FileNode Name="DML - Deletes pós restore.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>DML - Deletes pós restore.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DML - Escudos.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>DML - Escudos.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DML - Log IIS.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>DML - Log IIS.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DML - Query XML.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>DML - Query XML.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DML - Recompensas.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>DML - Recompensas.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DML - Tabelas com id fixo.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>DML - Tabelas com id fixo.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DML - Update indicações no futuro.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>DML - Update indicações no futuro.sql</FullPath>
+        </FileNode>
+        <FileNode Name="DML - pr_Cliente_del_cascade.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>DML - pr_Cliente_del_cascade.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Deploy Indicacao.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>Deploy Indicacao.sql</FullPath>
+        </FileNode>
+        <FileNode Name="REPORTS - DW2.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>REPORTS - DW2.sql</FullPath>
+        </FileNode>
+        <FileNode Name="REPORTS - Relats por email.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>REPORTS - Relats por email.sql</FullPath>
+        </FileNode>
+        <FileNode Name="REPORTS - diretoria.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>REPORTS - diretoria.sql</FullPath>
+        </FileNode>
+        <FileNode Name="REPORTS - exec de procs.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>REPORTS - exec de procs.sql</FullPath>
+        </FileNode>
+        <FileNode Name="REPORTS - pr_cargaBi.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>REPORTS - pr_cargaBi.sql</FullPath>
+        </FileNode>
+        <FileNode Name="REPORTS - track de falhas.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>REPORTS - track de falhas.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Z-OLD - Carga -  ProdutoServico e Operador.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>Z-OLD - Carga -  ProdutoServico e Operador.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Z-OLD - ClienteEmail.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>Z-OLD - ClienteEmail.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Z-OLD - Procs de Cliente COM ENCRIPTACAO.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>Z-OLD - Procs de Cliente COM ENCRIPTACAO.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Z-OLD - Security.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>Z-OLD - Security.sql</FullPath>
+        </FileNode>
+        <FileNode Name="Z-OLD - procs de encriptação.sql">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>Z-OLD - procs de encriptação.sql</FullPath>
+        </FileNode>
+      </Items>
+    </LogicalFolder>
+    <LogicalFolder Name="Miscellaneous" Type="3" Sorted="true">
+      <Items>
+        <FileNode Name="OpenFirewall.bat">
+          <AssociatedConnectionMoniker />
+          <AssociatedConnSrvName />
+          <AssociatedConnUserName />
+          <FullPath>OpenFirewall.bat</FullPath>
+        </FileNode>
+      </Items>
+    </LogicalFolder>
+  </Items>
+</SqlWorkbenchSqlProject>

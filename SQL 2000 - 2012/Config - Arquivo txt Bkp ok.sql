@@ -1,0 +1,1 @@
+EXEC xp_cmdshell 'bcp "SELECT getdate()" queryout "b:\dba\backupGXCOk.txt" -T -SPSDB001\DBPRODGXC001 -c'
