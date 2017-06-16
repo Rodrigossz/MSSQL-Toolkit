@@ -1,0 +1,3477 @@
+USE [master]
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_autokill]    Script Date: 08/19/2011 12:32:52 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_autokill]
+@tempo int = 7
+as
+begin
+declare @procs table (spid int primary key)
+insert @procs
+select distinct spid from master..sysprocesses a where 
+a.status = 'sleeping' and
+a.cmd = 'AWAITING COMMAND' and
+a.lastwaittype <> 'WRITELOG' and
+DATEDIFF(mi  , a.last_batch,GETDATE()) >= @tempo
+
+if @@ROWCOUNT = 0
+return
+
+declare @min int, @max int, @parm nvarchar(40)
+
+select @min = MIN(spid), @max =max(spid) from @procs
+
+while @min <= @max
+begin
+select 'Matando: ',@min
+
+select @parm = N'Kill '+ convert(nvarchar(6),@min)
+exec sp_executesql @parm    
+select @min = MIN(spid)  from @procs where spid > @min
+end
+end
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_fragmentation]    Script Date: 08/19/2011 12:32:54 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dba_fragmentation]
+as
+begin
+declare @db nvarchar(200) = db_name()
+declare @SQL nvarchar(4000) =  '
+SELECT distinct
+    OBJECT_SCHEMA_NAME(FRAG.[object_id]) , OBJECT_NAME(FRAG.[object_id]),
+    SIX.[name],    FRAG.avg_fragmentation_in_percent,    FRAG.page_count
+FROM
+    sys.dm_db_index_physical_stats
+    (
+        DB_ID(),    --use the currently connected database
+        0,          --Parameter for object_id.
+        DEFAULT,    --Parameter for index_id.
+        0,          --Parameter for partition_number.
+        DEFAULT     --Scanning mode. Default to "LIMITED", which is good enough
+    ) FRAG
+    JOIN '+@db+'.sys.indexes SIX ON FRAG.[object_id] = SIX.[object_id] AND FRAG.index_id = SIX.index_id
+WHERE
+FRAG.index_type_desc <> ''HEAP''
+ORDER BY
+    FRAG.avg_fragmentation_in_percent DESC'
+EXEC sp_executeSQL @SQL
+end;
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_estspace]    Script Date: 08/19/2011 12:32:54 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_estspace] as
+begin
+
+set nocount on
+--create table #Result (tab sysname  collate database_default, )
+declare @db nvarchar(200) = db_name()
+declare @SQL nvarchar(4000) ='
+SELECT ob.name [Table Name], convert(dec(8,2),sum(convert(dec(8,2),col.max_length))/1024) as MaxLenght_MB
+from '+@db+'.sys.tables ob join '+@db+'.sys.columns col on ob.object_id = col.object_id group by ob.name';
+EXEC sp_executeSQL @SQL; 
+end
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_ErrorLogFull]    Script Date: 08/19/2011 12:32:54 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create PROC [dbo].[sp_dba_ErrorLogFull]( 
+   @p1     INT = 0, 
+   @p2     INT = NULL, 
+   @p3     VARCHAR(255) = NULL, 
+   @p4     VARCHAR(255) = NULL) 
+AS 
+BEGIN 
+
+--This procedure takes four parameters:
+--1) Value of error log file you want to read: 0 = current, 1 = Archive #1, 2 = Archive #2, etc...
+--2) Log file type: 1 or NULL = error log, 2 = SQL Agent log
+--3) Search string 1: String one you want to search for
+--4) Search string 2: String two you want to search for to further refine the results
+
+
+   IF (NOT IS_SRVROLEMEMBER(N'securityadmin') = 1) 
+   BEGIN 
+      RAISERROR(15003,-1,-1, N'securityadmin') 
+      RETURN (1) 
+   END 
+    
+   IF (@p2 IS NULL) 
+       EXEC xp_readerrorlog @p1 
+   ELSE 
+       EXEC xp_readerrorlog @p1,@p2,@p3,@p4 
+END
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_dbUSe]    Script Date: 08/19/2011 12:32:53 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dba_dbUSe]
+as
+WITH agg AS
+(
+    SELECT
+        last_user_seek,
+        last_user_scan,
+        last_user_lookup,
+        last_user_update,
+        database_id
+    FROM
+        sys.dm_db_index_usage_stats
+)
+SELECT
+    database_id = convert(char(40),db_name(database_id)),
+    last_read   = MAX(last_read),
+    last_write  = MAX(last_write)
+FROM
+(
+    SELECT last_user_seek, NULL, database_id FROM agg
+    UNION ALL
+    SELECT last_user_scan, NULL, database_id FROM agg
+    UNION ALL
+    SELECT last_user_lookup, NULL, database_id FROM agg
+    UNION ALL
+    SELECT NULL, last_user_update, database_id FROM agg
+) AS x (last_read, last_write, database_id)
+GROUP BY db_name(database_id)
+ORDER BY last_read, last_write;
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_DataCompress]    Script Date: 08/19/2011 12:32:53 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dba_DataCompress]
+as
+
+SET NOCOUNT ON;
+
+IF OBJECT_ID(N'tempdb..#Results') IS NOT NULL
+DROP TABLE #Results
+
+IF OBJECT_ID(N'tempdb..#Cur') IS NOT NULL
+DROP TABLE #Cur
+
+
+DECLARE @SQL NVARCHAR(4000) 
+DECLARE @Schema SYSNAME  
+DECLARE @Table SYSNAME  
+DECLARE @PartitionNumber INT;
+declare @db sysname = ltrim(rtrim(db_name()))
+
+create table #Cur (sch sysname  collate database_default, tab sysname  collate database_default)
+
+CREATE TABLE #Results (
+ [Table] SYSNAME  collate database_default,
+ [Schema] SYSNAME  collate database_default,
+ IndexID INT,
+ PartitionNumber INT,
+ [CurrentSize(kb)] INT,
+ [CompressedSize(kb)] INT,
+ [SampleCurrentSize(kb)] INT,
+ [SampleCompressedSize(kb)] INT)
+
+ SET @SQL =  '
+INSERT INTO #Cur 
+select s.name, o.name FROM '+@db+'.sys.objects o JOIN '+ @db+'.sys.schemas s 
+ON s.schema_id = o.schema_id WHERE o.[type] = ''U'';'
+EXEC sp_executeSQL @SQL; 
+--select @SQL
+--select * from #Cur
+--return
+
+DECLARE TableCursor CURSOR FOR
+select sch, tab
+FROM #Cur
+ORDER BY 1,2
+
+OPEN TableCursor;
+FETCH NEXT FROM TableCursor INTO @Schema,@Table
+WHILE @@FETCH_STATUS = 0 
+ BEGIN
+  SET @SQL = '
+ INSERT INTO #Results 
+ ([Table],[Schema],IndexID,PartitionNumber,[CurrentSize(kb)],[CompressedSize(kb)],[SampleCurrentSize(kb)],[SampleCompressedSize(kb)]) 
+ EXEC sp_estimate_data_compression_savings ''' + @Schema + ''',''' + @Table + ''',NULL,NULL,''ROW'';';
+  --PRINT @SQL;
+ EXEC sp_executeSQL @SQL; 
+ FETCH NEXT FROM TableCursor INTO @Schema,@Table;
+ END;
+CLOSE TableCursor;
+DEALLOCATE TableCursor;
+
+DECLARE CompressionCursor CURSOR FOR
+ SELECT [Schema], [Table], MAX(PartitionNumber) PartitionNumber
+ FROM #Results r
+ WHERE (IndexID = 0
+ OR IndexID = 1  AND  EXISTS (Select 'x' FROM #Results r2 where r.[Schema] = r2.[Schema] and r.[Table] = r2.[Table] and r2.IndexID = 0))
+ AND (ROUND(CASE WHEN [CurrentSize(kb)] = 0 THEN 100 ELSE [CompressedSize(kb)] * 100. / [CurrentSize(kb)] END,2) BETWEEN 0.01 AND 80.00)
+ AND [CurrentSize(kb)] > 64
+ GROUP BY [Schema], [Table]
+ ORDER BY 1,2;
+
+if @@CURSOR_ROWS = 0
+begin
+select 'Nada para comprimir.'
+DROP TABLE #Results
+DROP TABLE #CUR
+return
+end
+
+OPEN CompressionCursor;
+
+FETCH NEXT FROM CompressionCursor INTO @Schema, @Table, @PartitionNumber;
+
+
+WHILE @@FETCH_STATUS = 0 
+ BEGIN
+ select @Table
+ SET @SQL = CASE WHEN EXISTS (SELECT * FROM #Results WHERE [Schema] = @Schema AND [Table] = @Table AND PartitionNumber > 1) THEN 'ALTER TABLE ' + @Schema + '.' + @Table + ' REBUILD PARTITION = ALL WITH (DATA_COMPRESSION = ROW,ONLINE = ON);'
+ ELSE 'ALTER TABLE ' + @Schema + '.' + @Table + ' REBUILD WITH (DATA_COMPRESSION = ROW,ONLINE = ON);' END;
+ PRINT @SQL;
+-- EXEC sp_executeSQL @SQL; 
+ FETCH NEXT FROM CompressionCursor INTO @Schema,@Table,@PartitionNumber;
+ END;
+CLOSE CompressionCursor;
+DEALLOCATE CompressionCursor;
+IF OBJECT_ID(N'tempdb..#Results') IS NOT NULL
+DROP TABLE #Results
+DROP TABLE #CUR
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_cachePlan]    Script Date: 08/19/2011 12:32:53 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dba_cachePlan]
+as
+set nocount on
+SELECT objtype AS 'Cached Object Type', 
+  COUNT(*) AS 'Numberof Plans', 
+  SUM(CAST(size_in_bytes AS BIGINT))/1048576 AS 'Plan Cache SIze (MB)', 
+  AVG(usecounts) AS 'Avg Use Counts' 
+FROM sys.dm_exec_cached_plans 
+GROUP BY objtype  
+ORDER BY objtype
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_cachedPlan]    Script Date: 08/19/2011 12:32:53 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dba_cachedPlan] @proc sysname
+as
+set nocount on
+SELECT plan_handle, query_plan, objtype, dbid, objectid 
+FROM sys.dm_exec_cached_plans cp
+CROSS APPLY sys.dm_exec_query_plan(cp.plan_handle)
+WHERE objtype = 'Proc'
+AND OBJECT_NAME(objectid, dbid) = @proc;
+
+
+--sp_dba_cachedPlan 'sp_dba_proc'
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_cached_plans]    Script Date: 08/19/2011 12:32:53 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_cached_plans]
+as
+SELECT top 10 st.text QueryText, usecounts
+FROM sys.dm_exec_cached_plans 
+CROSS APPLY sys.dm_exec_sql_text(plan_handle) AS st
+--WHERE text LIKE N'%uspPrintError%'
+order by 2 desc
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_SearchCachedPlans]    Script Date: 08/19/2011 12:32:57 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE PROC [dbo].[sp_dba_SearchCachedPlans] 
+@StringToSearchFor VARCHAR(255) = '%<MissingIndexes>%'
+AS 
+/*---------------------------------------------------------------------- 
+Purpose: Inspects cached plans for a given string. 
+------------------------------------------------------------------------
+
+Parameters: @StringToSearchFor - string to search for e.g. '%<MissingIndexes>%'.
+
+Revision History: 
+03/06/2008 Ian_Stirk@yahoo.com Initial version 
+
+Example Usage: 
+1. exec dbo.sp_dba_SearchCachedPlans '%<MissingIndexes>%' 
+2. exec dbo.sp_dba_SearchCachedPlans '%<ColumnsWithNoStatistics>%' 
+3. exec dbo.sp_dba_SearchCachedPlans '%<TableScan%' 
+4. exec dbo.sp_dba_SearchCachedPlans '%CREATE PROC%MessageWrite%'
+
+-----------------------------------------------------------------------*/ 
+BEGIN 
+-- Do not lock anything, and do not get held up by any locks. 
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED 
+SELECT TOP 20 
+st.text AS [SQL] 
+, cp.cacheobjtype 
+, cp.objtype 
+, DB_NAME(st.dbid)AS [DatabaseName] 
+, cp.usecounts AS [Plan usage] 
+, qp.query_plan 
+FROM sys.dm_exec_cached_plans cp 
+CROSS APPLY sys.dm_exec_sql_text(cp.plan_handle) st 
+CROSS APPLY sys.dm_exec_query_plan(cp.plan_handle) qp 
+WHERE CAST(qp.query_plan AS NVARCHAR(MAX))LIKE @StringToSearchFor 
+ORDER BY cp.usecounts DESC 
+
+select 'Outras opcoes: ',' exec dbo.sp_dba_SearchCachedPlans ''%<MissingIndexes>%''' 
+select 'Outras opcoes: ',' exec dbo.sp_dba_SearchCachedPlans ''%<ColumnsWithNoStatistics>%''' 
+select 'Outras opcoes: ',' exec dbo.sp_dba_SearchCachedPlans ''%<TableScan%''' 
+select 'Outras opcoes: ',' exec dbo.sp_dba_SearchCachedPlans ''%CREATE PROC%MessageWrite%''' 
+
+END
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_role]    Script Date: 08/19/2011 12:32:57 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_role]
+as
+EXEC sp_helprolemember'db_owner'
+EXEC sp_helprolemember 'db_datareader'
+EXEC sp_helprolemember 'db_datawriter'
+SELECT l.name AS 'login'
+FROM sysusers u 
+INNER JOIN master..syslogins l 
+ON u.sid = l.sid
+WHERE u.name = 'dbo'
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_procHist]    Script Date: 08/19/2011 12:32:56 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dba_procHist] 
+as
+SELECT SUBSTRING(qt.TEXT, (qs.statement_start_offset/2)+1,
+((CASE qs.statement_end_offset
+WHEN -1 THEN DATALENGTH(qt.TEXT)
+ELSE qs.statement_end_offset
+END - qs.statement_start_offset)/2)+1),
+qs.execution_count,
+qs.total_logical_reads, qs.total_logical_reads/qs.execution_count as AvgReadsCost,
+qs.last_logical_reads,
+qs.total_logical_writes, qs.last_logical_writes,
+qs.total_physical_reads, qs.last_logical_reads,
+qs.total_worker_time,
+qs.total_elapsed_time/1000000 total_elapsed_time_in_S
+FROM sys.dm_exec_query_stats qs
+CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) qt
+ORDER BY qs.total_logical_reads/qs.execution_count  DESC;
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_proc5]    Script Date: 08/19/2011 12:32:56 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dba_proc5] as
+SELECT CASE WHEN dbid = 32767 then 'Resource' ELSE DB_NAME(dbid)END AS DBName
+
+      ,OBJECT_SCHEMA_NAME(objectid,dbid) AS [SCHEMA_NAME]  
+
+      ,OBJECT_NAME(objectid,dbid)AS [OBJECT_NAME]
+
+      ,MAX(qs.creation_time) AS 'cache_time'
+
+      ,MAX(last_execution_time) AS 'last_execution_time'
+
+      ,MAX(usecounts) AS [execution_count]
+
+      ,SUM(total_worker_time) / SUM(usecounts) AS AVG_CPU
+
+      ,SUM(total_elapsed_time) / SUM(usecounts) AS AVG_ELAPSED
+
+      ,SUM(total_logical_reads) / SUM(usecounts) AS AVG_LOGICAL_READS
+
+      ,SUM(total_logical_writes) / SUM(usecounts) AS AVG_LOGICAL_WRITES
+
+      ,SUM(total_physical_reads) / SUM(usecounts)AS AVG_PHYSICAL_READS        
+
+FROM sys.dm_exec_query_stats qs  
+
+   join sys.dm_exec_cached_plans cp on qs.plan_handle = cp.plan_handle 
+
+   CROSS APPLY sys.dm_exec_sql_text(cp.plan_handle) 
+
+WHERE objtype = 'Proc' 
+
+  AND text
+
+       NOT LIKE '%CREATE FUNC%' 
+
+       GROUP BY cp.plan_handle,DBID,objectid
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_proc4]    Script Date: 08/19/2011 12:32:56 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_proc4] as
+SELECT CASE WHEN database_id = 32767 then 'Resource' ELSE DB_NAME(database_id)END AS DBName
+
+      ,OBJECT_SCHEMA_NAME(object_id,database_id) AS [SCHEMA_NAME]  
+
+      ,OBJECT_NAME(object_id,database_id)AS [OBJECT_NAME]
+
+      ,cached_time
+
+      ,last_execution_time
+
+      ,execution_count
+
+      ,total_worker_time / execution_count AS AVG_CPU
+
+      ,total_elapsed_time / execution_count AS AVG_ELAPSED
+
+      ,total_logical_reads / execution_count AS AVG_LOGICAL_READS
+
+      ,total_logical_writes / execution_count AS AVG_LOGICAL_WRITES
+
+      ,total_physical_reads  / execution_count AS AVG_PHYSICAL_READS
+
+FROM sys.dm_exec_procedure_stats  where OBJECT_NAME(object_id,database_id) is not null
+
+ORDER BY execution_count DESC
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_proc3]    Script Date: 08/19/2011 12:32:56 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_proc3]
+as
+set nocount on
+
+
+
+SELECT  spid=r.session_id,command,login_name,host_name,blk=blocking_session_id,percent_complete,
+r.cpu_time,duration_secs=r.total_elapsed_time/1000,r.status,r.logical_reads,r.reads,r.writes,
+DB_NAME(database_id) AS [Database], r.wait_time ,[text] AS [LAST_Query]  
+FROM sys.dm_exec_requests r  
+CROSS APPLY sys.dm_exec_sql_text(r.plan_handle) st  
+join sys.dm_exec_sessions p on r.session_id = p.session_id 
+WHERE r.session_Id > 50   
+union 
+SELECT  spid=p.session_id,program_name,login_name,host_name,
+blk=0,0,cpu_time,duration_secs=total_elapsed_time/1000,status,logical_reads,reads,writes,
+null AS [Database], cpu_time ,null AS [LAST_Query]  
+FROM sys.dm_exec_sessions p
+WHERE 
+exists (select 1 from sys.dm_exec_requests r2 where r2.blocking_session_id = p.session_id) 
+order by 1
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_proc2]    Script Date: 08/19/2011 12:32:56 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_proc2] as
+set nocount on
+SELECT T.[text], P.[query_plan], S.[program_name], r.blocking_session_id,r.status,S.[host_name],
+S.[client_interface_name], S.[login_name], R.*
+FROM sys.dm_exec_requests R
+INNER JOIN sys.dm_exec_sessions S 
+ON S.session_id = R.session_id
+CROSS APPLY sys.dm_exec_sql_text(sql_handle) AS T
+CROSS APPLY sys.dm_exec_query_plan(plan_handle) As P
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_Proc]    Script Date: 08/19/2011 12:32:56 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_Proc]           
+@parm char(1) = 'S'          
+as            
+            
+  set nocount on            
+  
+            
+          
+            
+            
+  -- PROCESSOS ATIVOS            
+            
+  declare  @sysprocesses table(            
+    spid         smallint not null,            
+    blocked      smallint null,            
+--    waittime     int null,            
+    dbid         smallint null,            
+    uid          smallint  null,            
+    cpu          int null,            
+    physical_io  bigint null,            
+    memusage     int null,            
+    last_batch   datetime  null,            
+    open_tran    smallint null,            
+    status       varchar(60) null,            
+    hostname     varchar(60) null,            
+    program_name varchar(50) null,            
+    cmd          varchar(50) null,            
+  loginame     varchar(50) null,            
+   sql_handle   binary (20) null,            
+    stmt_start   int,            
+    stmt_end     int , buffer varchar(600) ,        
+    waittime bigint,        
+lastwaittype nchar (64))
+            
+            
+  insert @sysprocesses            
+  select            
+    spid,            
+    blocked ,            
+  --  waittime,            
+    dbid,            
+    uid,            
+    cpu,            
+    physical_io,            
+    memusage,            
+    last_batch,            
+    open_tran,            
+    convert(char(60),status),            
+    convert(char(60),hostname),            
+    convert(char(50),program_name),            
+    convert(char(50),cmd),            
+    convert(char(50),loginame),            
+    convert(binary(20),sql_handle),            
+    stmt_start,            
+    stmt_end,null,    waittime ,        
+lastwaittype            
+  from sysprocesses (NOLOCK)             
+  where spid >= 50 and (open_tran > 0 or blocked <> 0 or status in         
+  ('suspend','running' ,'runnable'))    
+            
+  update @sysprocesses set hostname = 'FEP03' where hostname like '%B0%11%'    
+  update @sysprocesses set hostname = 'FEP02' where hostname like '%18%92%'    
+  update @sysprocesses set hostname = 'FEP01' where hostname like '%0F%A1%'    
+      
+         
+       
+            
+    if @parm = 'S' --faz o dbcc          
+BEGIN            
+            
+  -- select * from @sysprocesses            
+            
+            
+            
+  declare  @syslockinfo table(            
+    rsc_dbid   int null,            
+    rsc_indid  int null,            
+    rsc_objid  int null,            
+    rsc_type   int null,            
+    req_mode   int null,            
+    req_status int null,            
+    req_spid   int null )            
+            
+            
+            
+  insert @syslockinfo            
+  select            
+    rsc_dbid,            
+    rsc_indid,            
+    rsc_objid,            
+    rsc_type,            
+    req_mode,            
+    req_status,            
+    req_spid            
+  from master..syslockinfo a (NOLOCK)            
+  where exists (            
+    select 1 from @sysprocesses p            
+    where a.req_spid = p.spid  )            
+            
+declare @min int, @max int, @cmd varchar(50),@EventInfo varchar(500)            
+select @min = min(spid), @max = max(spid) from @sysprocesses            
+            
+              
+if exists (select 1 from tempdb..sysobjects where type = 'U' and name like 'buffer%')            
+drop table #buffer            
+create table #buffer  (eventType varchar(2000), parameters bigint, EventInfo varchar(2000))            
+            
+            
+while @min <= @max            
+begin            
+select @cmd = 'dbcc inputbuffer ('+ltrim(rtrim(convert(char(5),@min)))+')'            
+insert #buffer  (EventType, Parameters, EventInfo)             
+exec (@cmd)            
+select @EventInfo = EventInfo from #buffer            
+update @sysprocesses set buffer = @EventInfo where spid = @min            
+select @min = min(spid) from @sysprocesses where spid > @min            
+delete #buffer            
+end            
+      
+      
+            
+  select            
+    SPID = spid,                 
+    LOGIN = substring(loginame,1,20),                  
+    CPU = convert(char(7),cpu),                 
+    IO = convert(char(7),physical_io),            
+    MEM = convert(char(4),memusage),                 
+    STATUS = substring(b.status,1,20),                 
+    COMANDO = substring(cmd,1,20),                 
+    blocked    ,   
+    DB =  substring(db_name(dbid),1,30),           
+    waittime_ms=SUM ( waittime) ,        
+lastwaittype ,        
+PARADO_SEGs=DATEDIFF(ss  , max(last_batch),GETDATE()),    
+    HOSTNAME = substring(b.hostname,1,40),               
+    PGM = substring(b.program_name,1,30),            
+    TRANS = convert(char(2),b.open_tran),Buffer,            
+Qtd_Obj = count (distinct rsc_objid)            
+  from  @sysprocesses b left join @syslockinfo l on b.spid = l.req_spid            
+  where cmd not in ('awaiting command', 'WAITFOR')            
+    and spid <> @@spid            
+group by spid, substring(loginame,1,20),convert(char(7),cpu), convert(char(7),physical_io),convert(char(4),memusage),                 
+substring(b.status,1,20), substring(cmd,1,20),blocked,  substring(db_name(dbid),1,30),substring(b.hostname,1,40),                 
+substring(b.program_name,1,30),convert(char(2),b.open_tran),Buffer , lastwaittype           
+  union                 
+  select            
+    SPID = spid,                 
+    LOGIN = 'Backup',                  
+    CPU = convert(char(7),cpu),                 
+    IO = convert(char(7),physical_io),            
+    MEM = convert(char(4),memusage),                     
+    STATUS = substring(b.status,1,20),                 
+    COMANDO = substring(cmd,1,20),                 
+    blocked  ,  
+    DB =  substring(db_name(dbid),1,30),            
+     waittime_ms=SUM ( waittime) ,        
+lastwaittype ,        
+PARADO_SEGs=DATEDIFF(ss  , max(last_batch),GETDATE()),    
+    HOSTNAME = substring(b.hostname,1,40),                 
+    PGM = substring(b.program_name,1,30),            
+    TRANS = convert(char(2),b.open_tran),Buffer ,            
+Qtd_Obj = count (distinct rsc_objid)            
+from  @sysprocesses b left join @syslockinfo l on b.spid = l.req_spid            
+  where cmd in ('DUMP DATABASE', 'LOAD DATABASE')            
+    and spid <> @@spid            
+group by spid, substring(loginame,1,20),convert(char(7),cpu), convert(char(7),physical_io),convert(char(4),memusage),                 
+substring(b.status,1,20), substring(cmd,1,20),blocked,  substring(db_name(dbid),1,30),substring(b.hostname,1,40),                 
+substring(b.program_name,1,30),convert(char(2),b.open_tran),Buffer,lastwaittype    
+  union            
+   select            
+    SPID = spid,               
+    LOGIN = substring(loginame,1,20),                
+    CPU = convert(char(7),cpu),               
+    IO = convert(char(7),physical_io),            
+    MEM = convert(char(4),memusage),                   
+    STATUS = substring(b.status,1,20),               
+    COMANDO = substring(cmd,1,20),               
+    blocked ,
+    DB =  substring(db_name(dbid),1,30),             
+    waittime_ms=SUM ( waittime) ,        
+lastwaittype ,        
+PARADO_SEGs=DATEDIFF(ss  , max(last_batch),GETDATE()),     
+    HOSTNAME = substring(b.hostname,1,40),               
+    PGM = substring(b.program_name,1,30),            
+    TRANS = convert(char(2),b.open_tran) ,Buffer,            
+Qtd_Obj = count (distinct rsc_objid)            
+from  @sysprocesses b left join @syslockinfo l on b.spid = l.req_spid            
+  where exists (select 1 from @sysprocesses c where b.spid = c.blocked )            
+    and spid <> @@spid            
+group by spid, substring(loginame,1,20),convert(char(7),cpu), convert(char(7),physical_io),convert(char(4),memusage),                 
+substring(b.status,1,20), substring(cmd,1,20),blocked,  substring(db_name(dbid),1,30),substring(b.hostname,1,40),                 
+substring(b.program_name,1,30),convert(char(2),b.open_tran),Buffer  , lastwaittype      
+  union                 
+  select            
+    SPID = spid,                 
+    LOGIN = substring(loginame,1,20),                  
+    CPU = convert(char(7),cpu),                 
+    IO = convert(char(7),physical_io),            
+    MEM = convert(char(4),memusage),                     
+    STATUS = substring(b.status,1,20),                
+    COMANDO = substring(cmd,1,20),                 
+    blocked   ,  
+    DB =  substring(db_name(dbid),1,30),              
+ waittime_ms=SUM ( waittime) ,        
+lastwaittype ,        
+PARADO_SEGs=DATEDIFF(ss  , max(last_batch),GETDATE()),          
+    HOSTNAME = substring(b.hostname,1,40),                 
+    PGM = substring(b.program_name,1,30),            
+    TRANS = convert(char(2),b.open_tran) ,Buffer   ,            
+Qtd_Obj = count (distinct rsc_objid)            
+from  @sysprocesses b left join @syslockinfo l on b.spid = l.req_spid            
+  where (open_tran > 0 or blocked > 0)            
+    and spid <> @@spid            
+group by spid, substring(loginame,1,20),convert(char(7),cpu), convert(char(7),physical_io),convert(char(4),memusage),                 
+substring(b.status,1,20), substring(cmd,1,20),blocked,  substring(db_name(dbid),1,30),substring(b.hostname,1,40),                 
+substring(b.program_name,1,30),convert(char(2),b.open_tran),Buffer   , lastwaittype            
+order by 1            
+drop table #buffer            
+END --IF inicial          
+ELSE          
+begin          
+  select            
+    SPID = spid,                 
+    LOGIN = substring(loginame,1,20),                  
+    CPU = convert(char(7),cpu),                 
+    IO = convert(char(7),physical_io),            
+    MEM = convert(char(4),memusage),                 
+    STATUS = substring(b.status,1,20),                 
+    COMANDO = substring(cmd,1,20),                 
+    blocked     , 
+    DB =  substring(db_name(dbid),1,30),          
+ waittime_ms=SUM ( waittime) ,        
+lastwaittype ,        
+PARADO_SEGs=DATEDIFF(ss  , max(last_batch),GETDATE()),    
+    HOSTNAME = substring(b.hostname,1,40),                 
+    PGM = substring(b.program_name,1,30),            
+    TRANS = convert(char(2),b.open_tran),Buffer,            
+Qtd_Obj = count (distinct rsc_objid)            
+  from  @sysprocesses b left join @syslockinfo l on b.spid = l.req_spid            
+  where cmd not in ('awaiting command', 'WAITFOR')            
+    and spid <> @@spid            
+group by spid, substring(loginame,1,20),convert(char(7),cpu), convert(char(7),physical_io),convert(char(4),memusage),                 
+substring(b.status,1,20), substring(cmd,1,20),blocked,  substring(db_name(dbid),1,30),substring(b.hostname,1,40),                 
+substring(b.program_name,1,30),convert(char(2),b.open_tran),Buffer  , lastwaittype             
+  union                 
+  select            
+    SPID = spid,                 
+    LOGIN = 'Backup',                  
+    CPU = convert(char(7),cpu),                 
+    IO = convert(char(7),physical_io),            
+    MEM = convert(char(4),memusage),                     
+    STATUS = substring(b.status,1,20),                 
+    COMANDO = substring(cmd,1,20),                 
+    blocked ,  
+    DB =  substring(db_name(dbid),1,30),           
+ waittime_ms=SUM ( waittime) ,        
+lastwaittype ,        
+PARADO_SEGs=DATEDIFF(ss  , max(last_batch),GETDATE()),           
+    HOSTNAME = substring(b.hostname,1,40),                 
+    PGM = substring(b.program_name,1,30),            
+    TRANS = convert(char(2),b.open_tran),Buffer ,            
+Qtd_Obj = count (distinct rsc_objid)            
+from  @sysprocesses b left join @syslockinfo l on b.spid = l.req_spid            
+  where cmd in ('DUMP DATABASE', 'LOAD DATABASE')            
+    and spid <> @@spid         
+group by spid, substring(loginame,1,20),convert(char(7),cpu), convert(char(7),physical_io),convert(char(4),memusage),                 
+substring(b.status,1,20), substring(cmd,1,20),blocked,  substring(db_name(dbid),1,30),substring(b.hostname,1,40),                 
+substring(b.program_name,1,30),convert(char(2),b.open_tran),Buffer , lastwaittype              
+  union            
+   select            
+    SPID = spid,               
+    LOGIN = substring(loginame,1,20),                
+    CPU = convert(char(7),cpu),               
+    IO = convert(char(7),physical_io),            
+    MEM = convert(char(4),memusage),                   
+    STATUS = substring(b.status,1,20),               
+    COMANDO = substring(cmd,1,20),               
+    blocked   ,   
+    DB =  substring(db_name(dbid),1,30),              
+    waittime_ms=SUM ( waittime) ,        
+lastwaittype ,        
+PARADO_SEGs=DATEDIFF(ss  , max(last_batch),GETDATE()),    
+           
+    HOSTNAME = substring(b.hostname,1,40),               
+    PGM = substring(b.program_name,1,30),            
+    TRANS = convert(char(2),b.open_tran) ,Buffer,            
+Qtd_Obj = count (distinct rsc_objid)            
+from  @sysprocesses b left join @syslockinfo l on b.spid = l.req_spid            
+  where exists (select 1 from @sysprocesses c where b.spid = c.blocked )            
+    and spid <> @@spid            
+group by spid, substring(loginame,1,20),convert(char(7),cpu), convert(char(7),physical_io),convert(char(4),memusage),                 
+substring(b.status,1,20), substring(cmd,1,20),blocked,  substring(db_name(dbid),1,30),substring(b.hostname,1,40),                 
+substring(b.program_name,1,30),convert(char(2),b.open_tran),Buffer   , lastwaittype            
+  union                 
+  select            
+    SPID = spid,                 
+    LOGIN = substring(loginame,1,20),                  
+    CPU = convert(char(7),cpu),                 
+    IO = convert(char(7),physical_io),            
+    MEM = convert(char(4),memusage),                     
+    STATUS = substring(b.status,1,20),                
+    COMANDO = substring(cmd,1,20),                 
+    blocked ,  
+    DB =  substring(db_name(dbid),1,30),            
+    waittime_ms=SUM ( waittime) ,        
+lastwaittype ,        
+PARADO_SEGs=DATEDIFF(ss  , max(last_batch),GETDATE()),           
+    HOSTNAME = substring(b.hostname,1,40),                 
+    PGM = substring(b.program_name,1,30),            
+    TRANS = convert(char(2),b.open_tran) ,Buffer   ,            
+Qtd_Obj = count (distinct rsc_objid)            
+from  @sysprocesses b left join @syslockinfo l on b.spid = l.req_spid            
+  where (open_tran > 0 or blocked > 0)            
+    and spid <> @@spid            
+group by spid, substring(loginame,1,20),convert(char(7),cpu), convert(char(7),physical_io),convert(char(4),memusage),                 
+substring(b.status,1,20), substring(cmd,1,20),blocked,  substring(db_name(dbid),1,30),substring(b.hostname,1,40),                 
+substring(b.program_name,1,30),convert(char(2),b.open_tran),Buffer   , lastwaittype            
+
+order by 1            
+          
+end -- else
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_pr]    Script Date: 08/19/2011 12:32:56 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dba_pr]
+as
+begin
+set nocount on
+declare @db nvarchar(200) = db_name()
+declare @SQL nvarchar(4000) ='
+select name, create_date from '+@db+'.sys.procedures order by 1';
+EXEC sp_executeSQL @SQL; 
+end
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_OverlapRole]    Script Date: 08/19/2011 12:32:56 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dba_OverlapRole]
+as
+set nocount on 
+select 'ROLES' 
+SELECT TOP 10 SPMember.name AS [login name], SPRole.name AS [role name] 
+FROM master.sys.server_principals SPRole 
+ INNER JOIN master.sys.server_role_members SRM ON SPRole.principal_id = SRM.role_principal_id 
+ INNER JOIN master.sys.[server_principals] AS SPMember ON SRM.[member_principal_id] = SPMember.principal_id
+
+select 'OVELAPS' 
+
+SELECT SPMember.[login name], SPRole.name AS 'role name' 
+FROM master.sys.server_principals SPRole 
+ INNER JOIN master.sys.server_role_members SRM ON SPRole.principal_id = SRM.role_principal_id 
+ INNER JOIN 
+   ( 
+   SELECT SP.name AS 'login name', SP.principal_id  
+   FROM master.sys.server_principals sp_roles  
+     INNER JOIN master.sys.server_role_members SRM ON sp_roles.principal_id = SRM.role_principal_id 
+     INNER JOIN master.sys.server_principals SP ON  SRM.member_principal_id = SP.principal_id 
+   WHERE sp_roles.type_desc = 'SERVER_ROLE' --AND SP_roles.name <> 'sysadmin' 
+   GROUP BY SP.name, SP.principal_id 
+   HAVING COUNT(SP.name) > 1 
+   ) AS SPMember ON SRM.member_principal_id = SPMember.principal_id 
+ORDER BY SPMember.[login name]
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_osbufferdescriptors_agg]    Script Date: 08/19/2011 12:32:56 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_osbufferdescriptors_agg]
+as
+  /*
+SAMPLE EXECUTION:
+exec sp_osbufferdescriptors_agg
+*/
+  set nocount  on ;
+  
+  set transaction  isolation  level  read  uncommitted ;
+  
+  select   case 
+             when grouping(dbName) = 1 then '-- TOTAL ---'
+             else dbName
+           end as dbName,
+           case 
+             when grouping(fileId) = 1 then '-- TOTAL ---'
+             else fileId
+           end as fileId,
+           case 
+             when grouping(pageType) = 1 then '-- TOTAL ---'
+             else pageType
+           end as pageType,
+           count(* ) as countPages,
+           sum(row_count) as sumRowCount,
+           avg(row_count) as avgRowCount,
+           sum(freeSpaceBytes) as sumFreeSpaceBytes,
+           avg(freeSpaceBytes) as avgFreeSpaceBytes
+  from     (select case 
+                     when database_id = 32767 then 'resourceDb'
+                     else cast(db_name(database_id) as varchar(25))
+                   end as dbName,
+                   cast(file_id as varchar(10)) as fileId,
+                   cast(page_type as varchar(25)) as pageType,
+                   row_count as row_count,
+                   free_space_in_bytes as freeSpaceBytes
+            from   sys.dm_os_buffer_descriptors bufferDescriptor with (nolock)) tmp
+  group by dbName,fileId,pageType with rollup
+  order by 1 ,2  , 5 desc;
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_OrphanUser]    Script Date: 08/19/2011 12:32:56 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create procedure [dbo].[sp_dba_OrphanUser]
+as
+ALTER USER [PSAFE\IIS_PROD] WITH LOGIN = [PSAFE\IIS_PROD]
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_network]    Script Date: 08/19/2011 12:32:56 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dba_network] as
+Select 'SQL PORTS AND PROTOCOLS'
+
+SELECT      e.name,
+            e.endpoint_id,
+            e.principal_id,
+            e.protocol,
+            e.protocol_desc,
+            ec.local_net_address,
+            ec.local_tcp_port,
+            e.[type],
+            e.type_desc,
+            e.[state],
+            e.state_desc,
+            e.is_admin_endpoint
+FROM        sys.endpoints e 
+            LEFT OUTER JOIN sys.dm_exec_connections ec
+                ON ec.endpoint_id = e.endpoint_id
+GROUP BY    e.name,
+            e.endpoint_id,
+            e.principal_id,
+            e.protocol,
+            e.protocol_desc,
+            ec.local_net_address,
+            ec.local_tcp_port,
+            e.[type],
+            e.type_desc,
+            e.[state],
+            e.state_desc,
+            e.is_admin_endpoint
+            
+SELECT session_id, protocol_type, driver_version = 
+CASE SUBSTRING(CAST(protocol_version AS BINARY(4)), 1,1)
+WHEN 0x70 THEN 'SQL Server 7.0'
+WHEN 0x71 THEN 'SQL Server 2000'
+WHEN 0x72 THEN 'SQL Server 2005'
+WHEN 0x73 THEN 'SQL Server 2008'
+ELSE 'Unknown driver'  
+END,client_net_address ,client_tcp_port,local_tcp_port ,
+DATEDIFF(s,last_write,getdate()) as 'LAST_WRITE_MS',
+DATEDIFF(s,last_read,getdate()) as 'LAST_READ_MS',
+T.text
+FROM sys.dm_exec_connections
+CROSS APPLY sys.dm_exec_sql_text(most_recent_sql_handle) AS T
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_monitorLS]    Script Date: 08/19/2011 12:32:56 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_monitorLS] 
+as
+begin
+return
+/*
+select primary_server,primary_database,secondary_server,secondary_database,last_copied_date,last_restored_date,
+last_restored_latency_mins=last_restored_latency from ozdb03.msdb.dbo.log_shipping_monitor_secondary
+exec sp_help_log_shipping_monitor_primary @primary_server= 'OZDB01', @primary_database= 'ozdb' --Monitor server or primary server
+exec sp_help_log_shipping_alert_job --Monitor server, or primary or secondary server if no monitor is defined
+exec sp_help_log_shipping_primary_database @database= 'ozdb'--Primary server
+exec sp_help_log_shipping_primary_secondary @primary_database= 'ozdb'--Primary server
+*/
+end
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_monitorEncrypt]    Script Date: 08/19/2011 12:32:56 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dba_monitorEncrypt]
+as
+SELECT DB_NAME(e.database_id) AS DatabaseName, 
+            e.database_id, 
+            e.encryption_state, 
+    CASE e.encryption_state 
+                WHEN 0 THEN 'No database encryption key present, no encryption' 
+                WHEN 1 THEN 'Unencrypted' 
+                WHEN 2 THEN 'Encryption in progress' 
+                WHEN 3 THEN 'Encrypted' 
+                WHEN 4 THEN 'Key change in progress' 
+                WHEN 5 THEN 'Decryption in progress' 
+    END AS encryption_state_desc, 
+            c.name, 
+            e.percent_complete 
+    FROM sys.dm_database_encryption_keys AS e 
+    LEFT JOIN master.sys.certificates AS c 
+    ON e.encryptor_thumbprint = c.thumbprint
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_job2]    Script Date: 08/19/2011 12:32:54 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dba_job2]
+as
+exec msdb..sp_dba_job2
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_job]    Script Date: 08/19/2011 12:32:54 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dba_job] as
+begin
+set nocount on
+exec msdb..sp_dba_job
+end
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_io]    Script Date: 08/19/2011 12:32:54 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_io]
+as
+set nocount on
+begin
+
+
+declare @grupos table (banco varchar(30), groupname varchar(30), groupid int)
+
+insert @grupos 
+--select 'ozdb_hist' ,groupname, groupid  from ozdb_hist..sysfilegroups union
+select 'tempdb' ,groupname, groupid  from tempdb..sysfilegroups union
+select 'master' ,groupname, groupid  from master..sysfilegroups union
+select 'model' ,groupname, groupid  from model..sysfilegroups; 
+--select 'ozdb' ,groupname, groupid  from ozdb..sysfilegroups union
+--select 'ipdb' ,groupname, groupid  from ipdb..sysfilegroups union
+--select 'dbawork' ,groupname, groupid  from dbawork..sysfilegroups union
+--select 'distribution' ,groupname, groupid  from distribution..sysfilegroups 
+
+
+with IO_por_Banco as (
+select db_name(database_id) as Banco,FILE_ID as fileid,
+cast(sum(num_of_bytes_read + num_of_bytes_written) / 1048576 as decimal(12,2)) 
+as IO_Total_MB,
+cast(sum(num_of_bytes_read) / 1048576 as decimal(12,2)) as IO_Leitura_MB,
+cast(sum(num_of_bytes_written) / 1048576 as decimal(12,2)) as IO_Escrita_MB
+from sys.dm_io_virtual_file_stats(NULL,NULL) as dm
+group by database_id,file_id)
+
+select row_number() over (order by IO_Total_MB DESC) as Ranking,
+B.banco,s.name, size/1024 as size_MB,upper(substring(filename,1,1)) as drive, 
+isnull(substring(groupname,1,20),'LOG') as file_group,IO_Leitura_MB, IO_Escrita_MB,
+IO_Total_MB, cast(IO_Total_MB / sum(IO_Total_MB) over() * 100 as decimal(5,2)) as Percentual
+from IO_por_Banco b 
+join master..sysaltfiles s on DB_NAME(s.dbid) = b.Banco and s.fileid = b.fileid
+left outer join @grupos g on DB_NAME(s.dbid) = g.Banco and s.groupid = g.groupid
+order by Ranking
+end
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_indexCache]    Script Date: 08/19/2011 12:32:54 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_indexCache] 
+as
+set nocount on
+SELECT top 10 count(*)AS cached_pages_count 
+    ,name ,index_id 
+FROM sys.dm_os_buffer_descriptors AS bd 
+    INNER JOIN 
+    (
+        SELECT object_name(object_id) AS name 
+            ,index_id ,allocation_unit_id
+        FROM sys.allocation_units AS au
+            INNER JOIN sys.partitions AS p 
+                ON au.container_id = p.hobt_id 
+                    AND (au.type = 1 OR au.type = 3)
+        UNION ALL
+        SELECT object_name(object_id) AS name   
+            ,index_id, allocation_unit_id
+        FROM sys.allocation_units AS au
+            INNER JOIN sys.partitions AS p 
+                ON au.container_id = p.partition_id 
+                    AND au.type = 2
+    ) AS obj 
+        ON bd.allocation_unit_id = obj.allocation_unit_id
+WHERE database_id = db_id()
+GROUP BY name, index_id 
+ORDER BY cached_pages_count DESC
+
+
+SELECT count(*)AS cached_pages_count
+    ,CASE database_id 
+        WHEN 32767 THEN 'ResourceDb' 
+        ELSE db_name(database_id) 
+        END AS Database_name
+FROM sys.dm_os_buffer_descriptors
+GROUP BY db_name(database_id) ,database_id
+ORDER BY cached_pages_count DESC;
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_helpindex]    Script Date: 08/19/2011 12:32:54 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE PROCEDURE [dbo].[sp_dba_helpindex] 
+    @objname NVARCHAR(776)        -- the table to check for indexes 
+            AS 
+    -- PRELIM 
+    SET nocount ON 
+DECLARE @objid INT,            -- the object id of the table 
+    @indid smallint,    -- the index id of an index 
+    @groupid INT,        -- the filegroup id of an index 
+    @indname sysname, 
+    @groupname sysname, 
+    @status INT, 
+    @keys NVARCHAR(2126),    --Length (16*max_identifierLength)+(15*2)+(16*3) 
+    @include_cols NVARCHAR(2126), 
+    @dbname    sysname, 
+    @ignore_dup_key    bit, 
+    @is_unique        bit, 
+    @is_hypothetical    bit, 
+    @is_primary_key    bit, 
+    @is_unique_key    bit, 
+    @auto_created    bit, 
+    @no_recompute    bit 
+    -- Check to see that the object names are local to the current database. 
+SELECT @dbname = PARSENAME(@objname,3) 
+IF @dbname IS NULL 
+    SELECT @dbname = DB_NAME() 
+ELSE  
+IF @dbname <> DB_NAME() 
+    BEGIN 
+    RAISERROR(15250,-1,-1) 
+    RETURN (1) 
+    END 
+    -- Check to see the the table exists and initialize @objid. 
+SELECT @objid = OBJECT_ID(@objname) 
+IF @objid IS NULL 
+    BEGIN 
+    RAISERROR(15009,-1,-1,@objname,@dbname) 
+    RETURN (1) 
+    END 
+    -- OPEN CURSOR OVER INDEXES (skip stats: bug shiloh_51196)
+DECLARE ms_crs_ind CURSOR local static FOR 
+SELECT i.index_id, i.data_space_id, i.name, 
+            i.ignore_dup_key, i.is_unique, i.is_hypothetical, i.is_primary_key, i.is_unique_constraint, 
+            s.auto_created, s.no_recompute 
+    FROM sys.indexes i JOIN sys.stats s 
+            ON i.OBJECT_ID = s.OBJECT_ID  
+        AND i.index_id = s.stats_id 
+    WHERE i.OBJECT_ID = @objid 
+OPEN ms_crs_ind 
+            FETCH ms_crs_ind INTO @indid, @groupid, @indname, @ignore_dup_key, @is_unique, @is_hypothetical, 
+    @is_primary_key, @is_unique_key, @auto_created, @no_recompute 
+    -- IF NO INDEX, QUIT 
+IF @@fetch_status < 0 
+    BEGIN 
+                DEALLOCATE ms_crs_ind 
+    RAISERROR(15472,-1,-1,@objname) -- Object does not have any indexes. 
+    RETURN (0) 
+    END 
+    -- create temp table 
+CREATE TABLE #spindtab 
+    ( 
+                index_name            sysname    collate database_default NOT NULL, 
+                index_id                INT, 
+                ignore_dup_key        bit, 
+                is_unique                bit, 
+                is_hypothetical        bit, 
+                is_primary_key        bit, 
+                is_unique_key            bit, 
+                auto_created            bit, 
+                no_recompute            bit, 
+                groupname            sysname collate database_default NULL, 
+                index_keys            NVARCHAR(2126)    collate database_default NOT NULL, -- see @keys above for length descr 
+                includes            NVARCHAR(2126)  collate database_default NOT NULL 
+    ) 
+    -- Now check out each index, figure out its type and keys and 
+    -- save the info in a temporary table that we'll print out at the end. 
+WHILE @@fetch_status >= 0 
+    BEGIN 
+        -- First we'll figure out what the keys are. 
+    DECLARE @i INT, @thiskey NVARCHAR(131) -- 128+3 
+    SELECT @keys = INDEX_COL(@objname, @indid, 1), @i = 2 
+    IF (INDEXKEY_PROPERTY(@objid, @indid, 1, 'isdescending') = 1) 
+        SELECT @keys = @keys  + '(-)' 
+    SELECT @thiskey = INDEX_COL(@objname, @indid, @i) 
+    IF ((@thiskey IS NOT NULL)  
+                AND (INDEXKEY_PROPERTY(@objid, @indid, @i, 'isdescending') = 1)) 
+        SELECT @thiskey = @thiskey + '(-)' 
+    WHILE (@thiskey IS NOT NULL ) 
+        BEGIN 
+        SELECT @keys = @keys + ', ' + @thiskey, @i = @i + 1 
+        SELECT @thiskey = INDEX_COL(@objname, @indid, @i) 
+        IF ((@thiskey IS NOT NULL)  
+                    AND (INDEXKEY_PROPERTY(@objid, @indid, @i, 'isdescending') = 1)) 
+            SELECT @thiskey = @thiskey + '(-)' 
+        END 
+    SELECT @groupname = NULL 
+SELECT @groupname = name  
+        FROM sys.data_spaces  
+        WHERE data_space_id = @groupid 
+    DECLARE IncludeColsCursor CURSOR FOR 
+    SELECT obj.name 
+        FROM sys.index_columns AS col 
+                INNER JOIN sys.syscolumns AS obj 
+                ON col.OBJECT_ID = obj.id 
+            AND col.column_id = obj.colid 
+        WHERE is_included_column = 1 
+            AND col.OBJECT_ID = @objid 
+            AND col.index_id = @indid 
+        ORDER BY col.index_column_id 
+    OPEN IncludeColsCursor 
+                FETCH IncludeColsCursor INTO @thiskey
+        SET @include_cols = '' 
+    WHILE @@FETCH_STATUS = 0 
+        BEGIN 
+            SET @include_cols = @include_cols + CASE WHEN @include_cols = '' THEN ''  
+            ELSE ', ' END + @thiskey 
+                    FETCH IncludeColsCursor INTO @thiskey 
+        END 
+                CLOSE IncludeColsCursor 
+                DEALLOCATE IncludeColsCursor 
+        -- INSERT ROW FOR INDEX 
+    INSERT INTO #spindtab  
+            VALUES (@indname, @indid, @ignore_dup_key, @is_unique, @is_hypothetical, 
+            @is_primary_key, @is_unique_key, @auto_created, @no_recompute, @groupname, @keys, @include_cols) 
+        -- Next index 
+                FETCH ms_crs_ind INTO @indid, @groupid, @indname, @ignore_dup_key, @is_unique, @is_hypothetical, 
+        @is_primary_key, @is_unique_key, @auto_created, @no_recompute 
+    END 
+            DEALLOCATE ms_crs_ind 
+    -- DISPLAY THE RESULTS 
+SELECT 
+    'index_name' = index_name, 
+    'index_description' = CONVERT(VARCHAR(210), --bits 16 off, 1, 2, 16777216 on, located on group 
+        CASE WHEN index_id = 1 THEN 'clustered'  
+        ELSE 'nonclustered' END 
+                + CASE WHEN ignore_dup_key <>0 THEN ', ignore duplicate keys'  
+        ELSE '' END 
+                + CASE WHEN is_unique <>0 THEN ', unique'  
+        ELSE '' END 
+                + CASE WHEN is_hypothetical <>0 THEN ', hypothetical'  
+        ELSE '' END 
+                + CASE WHEN is_primary_key <>0 THEN ', primary key'  
+        ELSE '' END 
+                + CASE WHEN is_unique_key <>0 THEN ', unique key'  
+        ELSE '' END 
+                + CASE WHEN auto_created <>0 THEN ', auto create'  
+        ELSE '' END 
+                + CASE WHEN no_recompute <>0 THEN ', stats no recompute'  
+        ELSE '' END 
+                + ' located on ' + groupname), 
+    'index_keys' = index_keys, 
+    'include_cols' = includes 
+    FROM #spindtab 
+    ORDER BY index_name 
+RETURN (0) -- sp_dba_helpindex
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_helpdb]    Script Date: 08/19/2011 12:32:54 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_helpdb]
+as
+SELECT d.name as Dbname,p.name as Owner,  collation_name,
+       DATABASEPROPERTYEX(d.name, 'Recovery') as Recovery, 
+       DATABASEPROPERTYEX(d.name, 'Status') as Status,
+       DATABASEPROPERTYEX(d.name, 'IsAutoUpdateStatistics') as AutoUpdateStats,       
+       d.is_auto_update_stats_async_on as AutoUpdateStatsAsync,       
+       DATABASEPROPERTYEX(d.name, 'Updateability') as Updateability,
+       DATABASEPROPERTYEX(d.name, 'UserAccess') as UserAccess,
+       DATABASEPROPERTYEX(d.name, 'IsAutoShrink') as IsAutoShrink,
+       d.is_cdc_enabled
+FROM   sys.databases d join sys.database_principals p on d.owner_sid = p.sid
+ORDER BY 1
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_help]    Script Date: 08/19/2011 12:32:54 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+Create proc [dbo].[sp_dba_help] as
+--select 'Master','select 'Master','''+name+'',''''from sys.objects where type = 'p'and name like 'sp_dba%'order by 1
+set nocount on
+
+;with DBA_PROCS as (
+select 'Master' as Db,'sp_dba_autokill'as Nome,'Mata qq processo parado prendendo outros'as Help union
+select 'Master','sp_dba_AuthenticationMode','Mostra o Authentication Mode do SQL' union
+select 'Master','sp_dba_bkp','Analisa espaÁo em disco e os tamanhos de database, bkp, etc' union
+select 'Master','sp_dba_BkpMissing','Mostra databases sem Bkp' union
+select 'Master','sp_dba_cached_plans','Comandos mais executados' union
+select 'Master','sp_dba_cachePlan','Consumo de Cache por tipo de comando / Objeto' union
+select 'Master','sp_dba_CheckMail','Mostra envios de email com problema nas ˙ltimas 24 horas' union
+select 'Master','sp_dba_ErrorLog','Lista o que h· de crÌtico no errorlog' union
+select 'Master','sp_dba_ErrorLogFull','Lista todo o errorlog' union
+select 'Master','sp_dba_Help','Help das proc' union
+select 'Master','sp_dba_Helpdb','Lista os databases de forma mais objetiva, com detalhes importantes' union
+select 'Master','sp_dba_identity','Tabelas com campo identity e o risco de estourar o limite do campo' union
+select 'Master','sp_dba_indexCache','Uso de cache por Ìndice e por database' union
+select 'Master','sp_dba_indexUsage','Lista de Ìndices com uso' union
+select 'Master','sp_dba_io','Size e Disk Time por datafile' union
+select 'Master','sp_dba_ix','Lista os Ìndices do database atual' union
+select 'Master','sp_dba_job','Chama a sp_dba_job do msdb. Status e duraÁ„o dos jobs' union
+select 'Master','sp_dba_JobsOutput','Forma de output de cada step de cada job' union
+select 'Master','sp_dba_kill','Mata um processo ou todos q estiverem num database' union
+select 'Master','sp_dba_lock','An·lise completa dos locks atuais do servidor' union
+select 'Master','sp_dba_monitor','Checkup completo do servidor' union
+select 'Master','sp_dba_monitorLS','Status do Log shipping' union
+select 'Master','sp_dba_network','Sql Server Network configurations' union
+select 'Master','sp_dba_osbufferdescriptors_agg','Descriptors do Cache' union
+select 'Master','sp_dba_OverlapRole','users com sobreposiÁ„o de roles' union
+select 'Master','sp_dba_pr','Lista as procs do database atual' union
+select 'Master','sp_dba_Proc','Processos ativos no sql c/ Comando atual' union
+select 'Master','sp_dba_Proc2','Processos ativos no sql c/ Comando atual - LIGHT' union
+select 'Master','sp_dba_proc3','Processos ativos no sql c/ Comando anterior' union
+select 'Master','sp_dba_role','Security roles do servidor' union
+select 'Master','sp_dba_SearchCachedPlans','Missing statistics and indexes, Scans' union
+select 'Master','sp_dba_startup','Comandos do DBA executados a cada restart do SQL' union
+select 'Master','sp_dba_string','Procura uma string no create de todos os objetos de todos os databases' union
+select 'Master','sp_dba_tb','Lista as user tables do database atual' union
+select 'Master','sp_dba_tbUse','EstatÌsticas de uso para tabelas e Ìndices do database atual: lookups, seeks, scans, etc' union
+select 'Master','sp_dba_version','Vers„o atual do BD' union
+select 'Master','sp_dba_vw','Lista as user views do database atual' union
+select 'Master','sp_dba_wait','An·lise de processos demorando: % do wait time por wait type' union
+select 'Master','sp_dba_wait2','An·lise de processos demorando: % do wait time por wait type' union
+select 'Master','sp_dba_wait3','An·lise de processos demorando: % do wait time por wait type' union
+select 'Master','sp_dba_estspace','Estima o tamanho m·ximo de cada tabela do database, para uma linha.'  union
+select 'Master','sp_dba_XEvent','Lista os Extended Events de monitoramento'  union
+select 'Msdb','sp_dba_get_composite_job_info','Ajuda a sp_dba_job do msdb'  union
+select 'Msdb','sp_dba_job','Status e duraÁ„o dos jobs' )
+
+select h.Db, p.name as nome, help 
+from Master.sys.procedures p left outer join DBA_PROCS h on p.name = h.Nome
+where name like 'sp_dba_%' and db = 'Master' union
+select  Db, p.name as nome, help 
+from msdb.sys.procedures p left outer join DBA_PROCS h on p.name = h.Nome
+where name like 'sp_dba_%' and db = 'Msdb'
+order by 1
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_GetMetrics]    Script Date: 08/19/2011 12:32:54 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE PROC [dbo].[sp_dba_GetMetrics]
+
+AS
+
+SET NOCOUNT ON;
+
+ 
+
+-- Variables for Counters
+
+DECLARE @BatchRequestsPerSecond BIGINT;
+
+DECLARE @CompilationsPerSecond BIGINT;
+
+DECLARE @ReCompilationsPerSecond BIGINT;
+
+DECLARE @LockWaitsPerSecond BIGINT;
+
+DECLARE @PageSplitsPerSecond BIGINT;
+
+DECLARE @CheckpointPagesPerSecond BIGINT;
+
+ 
+
+-- Variable for date
+
+DECLARE @stat_date DATETIME;
+
+ 
+
+-- Table for First Sample
+
+DECLARE @RatioStatsX TAbLE(
+
+       [object_name] varchar(128)
+
+      ,[counter_name] varchar(128)
+
+      ,[instance_name] varchar(128)
+
+      ,[cntr_value] bigint
+
+      ,[cntr_type] int
+
+      )
+
+ 
+
+-- Table for Second Sample
+
+DECLARE @RatioStatsY TABLE(
+
+       [object_name] VARCHAR(128)
+
+      ,[counter_name] VARCHAR(128)
+
+      ,[instance_name] VARCHAR(128)
+
+      ,[cntr_value] BIGINT
+
+      ,[cntr_type] INT
+
+      );
+
+ 
+
+-- Capture stat time
+
+SET @stat_date = getdate();
+
+ 
+
+INSERT INTO @RatioStatsX (
+
+     [object_name]
+
+      ,[counter_name]
+
+      ,[instance_name]
+
+      ,[cntr_value]
+
+      ,[cntr_type] )
+
+      SELECT [object_name]
+
+            ,[counter_name]
+
+            ,[instance_name]
+
+            ,[cntr_value]
+
+            ,[cntr_type] FROM sys.dm_os_performance_counters;
+
+ 
+
+-- Capture each per second counter for first sampling
+
+SELECT TOP 1 @BatchRequestsPerSecond = cntr_value
+
+      FROM @RatioStatsX
+
+    WHERE counter_name = 'Batch Requests/sec'
+
+      AND object_name LIKE '%SQL Statistics%';
+
+ 
+
+SELECT TOP 1 @CompilationsPerSecond = cntr_value
+
+      FROM @RatioStatsX
+
+    WHERE counter_name = 'SQL Compilations/sec'
+
+      AND object_name LIKE '%SQL Statistics%';
+
+ 
+
+SELECT TOP 1 @ReCompilationsPerSecond = cntr_value
+
+      FROM @RatioStatsX
+
+    WHERE counter_name = 'SQL Re-Compilations/sec'
+
+      AND object_name LIKE '%SQL Statistics%';
+
+ 
+
+SELECT TOP 1 @LockWaitsPerSecond = cntr_value
+
+      FROM @RatioStatsX
+
+    WHERE counter_name = 'Lock Waits/sec'
+
+      AND instance_name = '_Total'
+
+      AND object_name LIKE '%Locks%';
+
+ 
+
+SELECT TOP 1 @PageSplitsPerSecond = cntr_value
+
+      FROM @RatioStatsX
+
+    WHERE counter_name = 'Page Splits/sec'
+
+      AND object_name LIKE '%Access Methods%'; 
+
+ 
+
+SELECT TOP 1 @CheckpointPagesPerSecond = cntr_value
+
+      FROM @RatioStatsX
+
+      WHERE counter_name = 'Checkpoint Pages/sec'
+
+        AND object_name LIKE '%Buffer Manager%';                                         
+
+ 
+
+WAITFOR DELAY '00:00:01'
+
+ 
+
+-- Table for second sample
+
+INSERT INTO @RatioStatsY (
+
+            [object_name]
+
+            ,[counter_name]
+
+            ,[instance_name]
+
+            ,[cntr_value]
+
+            ,[cntr_type] )
+
+   SELECT [object_name]
+
+            ,[counter_name]
+
+            ,[instance_name]
+
+            ,[cntr_value]
+
+            ,[cntr_type] FROM sys.dm_os_performance_counters
+
+ 
+
+SELECT (a.cntr_value * 1.0 / b.cntr_value) * 100.0 [BufferCacheHitRatio]
+
+      ,c.cntr_value  AS [PageLifeExpectency]
+
+      ,d.[BatchRequestsPerSecond]
+
+      ,e.[CompilationsPerSecond]
+
+      ,f.[ReCompilationsPerSecond]
+
+      ,g.cntr_value AS [UserConnections]
+
+      ,h.LockWaitsPerSecond 
+
+      ,i.PageSplitsPerSecond
+
+      ,j.cntr_value AS [ProcessesBlocked]
+
+      ,k.CheckpointPagesPerSecond
+
+      ,GETDATE() AS StatDate                                     
+
+FROM (SELECT * FROM @RatioStatsY
+
+               WHERE counter_name = 'Buffer cache hit ratio'
+
+               AND object_name LIKE '%Buffer Manager%') a  
+
+     CROSS JOIN  
+
+      (SELECT * FROM @RatioStatsY
+
+                WHERE counter_name = 'Buffer cache hit ratio base'
+
+                AND object_name LIKE '%Buffer Manager%') b    
+
+     CROSS JOIN
+
+      (SELECT * FROM @RatioStatsY
+
+                WHERE counter_name = 'Page life expectancy '
+
+                AND object_name LIKE '%Buffer Manager%') c
+
+     CROSS JOIN
+
+     (SELECT (cntr_value - @BatchRequestsPerSecond) /
+
+                     (CASE WHEN datediff(ss,@stat_date, getdate()) = 0
+
+                           THEN  1
+
+                           ELSE datediff(ss,@stat_date, getdate()) END) AS [BatchRequestsPerSecond]
+
+                FROM @RatioStatsY
+
+                WHERE counter_name = 'Batch Requests/sec'
+
+                AND object_name LIKE '%SQL Statistics%') d   
+
+     CROSS JOIN
+
+     (SELECT (cntr_value - @CompilationsPerSecond) /
+
+                     (CASE WHEN datediff(ss,@stat_date, getdate()) = 0
+
+                           THEN  1
+
+                           ELSE datediff(ss,@stat_date, getdate()) END) AS [CompilationsPerSecond]
+
+                FROM @RatioStatsY
+
+                WHERE counter_name = 'SQL Compilations/sec'
+
+                AND object_name LIKE '%SQL Statistics%') e 
+
+     CROSS JOIN
+
+     (SELECT (cntr_value - @ReCompilationsPerSecond) /
+
+                     (CASE WHEN datediff(ss,@stat_date, getdate()) = 0
+
+                           THEN  1
+
+                           ELSE datediff(ss,@stat_date, getdate()) END) AS [ReCompilationsPerSecond]
+
+                FROM @RatioStatsY
+
+                WHERE counter_name = 'SQL Re-Compilations/sec'
+
+                AND object_name LIKE '%SQL Statistics%') f
+
+     CROSS JOIN
+
+     (SELECT * FROM @RatioStatsY
+
+               WHERE counter_name = 'User Connections'
+
+               AND object_name LIKE '%General Statistics%') g
+
+     CROSS JOIN
+
+     (SELECT (cntr_value - @LockWaitsPerSecond) /
+
+                     (CASE WHEN datediff(ss,@stat_date, getdate()) = 0
+
+                           THEN  1
+
+                           ELSE datediff(ss,@stat_date, getdate()) END) AS [LockWaitsPerSecond]
+
+                FROM @RatioStatsY
+
+                WHERE counter_name = 'Lock Waits/sec'
+
+                AND instance_name = '_Total'
+
+                AND object_name LIKE '%Locks%') h
+
+     CROSS JOIN
+
+     (SELECT (cntr_value - @PageSplitsPerSecond) /
+
+                     (CASE WHEN datediff(ss,@stat_date, getdate()) = 0
+
+                           THEN  1
+
+                           ELSE datediff(ss,@stat_date, getdate()) END) AS [PageSplitsPerSecond]
+
+                FROM @RatioStatsY
+
+                WHERE counter_name = 'Page Splits/sec'
+
+                AND object_name LIKE '%Access Methods%') i
+
+     CROSS JOIN
+
+     (SELECT * FROM @RatioStatsY
+
+               WHERE counter_name = 'Processes blocked'
+
+               AND object_name LIKE '%General Statistics%') j
+
+     CROSS JOIN
+
+     (SELECT (cntr_value - @CheckpointPagesPerSecond) /
+
+                     (CASE WHEN datediff(ss,@stat_date, getdate()) = 0
+
+                           THEN  1
+
+                           ELSE datediff(ss,@stat_date, getdate()) END) AS [CheckpointPagesPerSecond]
+
+                FROM @RatioStatsY
+
+                WHERE counter_name = 'Checkpoint Pages/sec'
+
+                AND object_name LIKE '%Buffer Manager%') k
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_lock2]    Script Date: 08/19/2011 12:32:55 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dba_lock2]
+as
+set nocount on 
+SELECT
+   DB_NAME() AS database_name, 
+   GETDATE() AS audit_time, 
+   s.spid AS process_id, 
+   s.blocked AS blocking_process_id,
+   s.hostname, 
+   s.loginame, 
+   s.program_name,
+   blocking_s.hostname AS blocking_hostname, 
+   blocking_s.loginame AS blocking_loginame, 
+   blocking_s.program_name AS blocking_program_name,
+   REPLACE(REPLACE(buffer.[text], CHAR(10), ''), 
+           CHAR(9), '') AS sql_statement,
+   SUBSTRING (buffer.[text], request.statement_start_offset/2, 
+   (CASE 
+      WHEN request.statement_end_offset = -1 
+      THEN LEN(CONVERT(NVARCHAR(MAX), buffer.[text])) * 2 
+      ELSE request.statement_end_offset 
+    END - request.statement_start_offset)/2) AS specific_sql,
+   REPLACE(REPLACE(blocking_buffer.[text], CHAR(10), ''), 
+           CHAR(9), '') AS blocking_sql_statement,
+   o.[name] AS blocking_object, 
+   blocking_tr_locks.request_mode
+FROM 
+   sys.sysprocesses s INNER JOIN
+   sys.dm_exec_connections conn
+ON
+   s.spid = conn.session_id CROSS APPLY 
+   sys.dm_exec_sql_text(conn.most_recent_sql_handle) AS buffer 
+   LEFT JOIN sys.dm_exec_requests request
+ON
+   conn.session_id = request.session_id INNER JOIN
+   sys.dm_exec_connections blocking_conn 
+ON
+   s.blocked = blocking_conn.session_id CROSS APPLY 
+   sys.dm_exec_sql_text(blocking_conn.most_recent_sql_handle) 
+   AS blocking_buffer INNER JOIN
+   sys.dm_tran_locks blocking_tr_locks
+ON
+   s.blocked = blocking_tr_locks.request_session_id INNER JOIN
+   sys.objects o 
+ON
+   blocking_tr_locks.resource_associated_entity_id = o.object_id 
+   INNER JOIN sys.sysprocesses blocking_s
+ON
+   s.blocked = blocking_s.spid
+WHERE
+   s.blocked <> 0
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_lock]    Script Date: 08/19/2011 12:32:55 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_lock]
+as
+SELECT 
+        t1.resource_type,
+        t1.resource_database_id,
+        t1.resource_associated_entity_id,
+        t1.request_mode,
+        t1.request_session_id,
+        t2.blocking_session_id
+    FROM sys.dm_tran_locks as t1
+    INNER JOIN sys.dm_os_waiting_tasks as t2
+        ON t1.lock_owner_address = t2.resource_address
+
+SELECT DTL.resource_type,  
+   CASE   
+       WHEN DTL.resource_type IN ('DATABASE', 'FILE', 'METADATA') THEN DTL.resource_type  
+       WHEN DTL.resource_type = 'OBJECT' THEN OBJECT_NAME(DTL.resource_associated_entity_id)  
+       WHEN DTL.resource_type IN ('KEY', 'PAGE', 'RID') THEN   
+           (  
+           SELECT OBJECT_NAME([object_id])  
+           FROM sys.partitions  
+           WHERE sys.partitions.hobt_id =   
+           DTL.resource_associated_entity_id  
+           )  
+       ELSE 'Unidentified'  
+   END AS requested_object_name, DTL.request_mode, DTL.request_status,    
+   DOWT.wait_duration_ms, DOWT.wait_type, DOWT.session_id AS [blocked_session_id],  
+   sp_blocked.[loginame] AS [blocked_user], DEST_blocked.[text] AS [blocked_command], 
+   DOWT.blocking_session_id, sp_blocking.[loginame] AS [blocking_user],  
+   DEST_blocking.[text] AS [blocking_command], DOWT.resource_description     
+FROM sys.dm_tran_locks DTL  
+   INNER JOIN sys.dm_os_waiting_tasks DOWT   
+       ON DTL.lock_owner_address = DOWT.resource_address   
+   INNER JOIN sys.sysprocesses sp_blocked  
+       ON DOWT.[session_id] = sp_blocked.[spid] 
+   INNER JOIN sys.sysprocesses sp_blocking  
+       ON DOWT.[blocking_session_id] = sp_blocking.[spid] 
+   CROSS APPLY sys.[dm_exec_sql_text](sp_blocked.[sql_handle]) AS DEST_blocked 
+   CROSS APPLY sys.[dm_exec_sql_text](sp_blocking.[sql_handle]) AS DEST_blocking 
+WHERE DTL.[resource_database_id] = DB_ID()
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_kill]    Script Date: 08/19/2011 12:32:54 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_kill] @parm nvarchar(40)  
+as  
+set nocount on  
+declare @kill table (spid nvarchar(20),id int)  
+declare @min nvarchar(20), @max nvarchar(20)  
+
+  
+if isnumeric(@parm ) = 1  
+begin  
+select 'Matando: ', @parm  
+select @parm = N'Kill '+@parm  
+exec sp_executesql @parm  
+return  
+end  
+  
+if exists (select 1 from master..syslogins where name = @parm)  
+begin  
+select 'Matando todas as conexoes do login ',@parm  
+  
+insert @kill select rtrim(convert(nvarchar(10),spid))  ,spid 
+from master..sysprocesses p left join master..syslogins l on p.sid = l.sid where l.name = @parm  and spid <> @@spid
+
+select @min = min(id) , @max = max(id) from @kill  
+
+while @min <= @max  
+begin  
+select 'matando: ',@min  
+select @parm = N'Kill '+ltrim(rtrim(spid )) from @kill where id = @min
+exec sp_executesql @parm  
+select @min = min(spid) from @kill where id > @min  
+end  
+end
+
+
+
+
+if exists (select 1 from master..sysdatabases where name = @parm)  
+begin  
+select 'Matando todas as conexoes do db ',@parm  
+    
+insert @kill select rtrim(convert(nvarchar(10),spid))  ,spid 
+from master..sysprocesses p left 
+join master..syslogins l on p.sid = l.sid 
+join master..sysdatabases d on p.dbid = d.dbid
+where d.name = @parm  and spid <> @@spid and spid > 50
+
+select @min = min(id) , @max = max(id) from @kill  
+
+while @min <= @max  
+begin  
+select 'matando: ',@min  
+select @parm = N'Kill '+ltrim(rtrim(spid )) from @kill where id = @min
+exec sp_executesql @parm  
+select @min = min(spid) from @kill where id > @min  
+end  
+end
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_vw]    Script Date: 08/19/2011 12:32:57 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_vw]
+as
+begin
+set nocount on
+declare @db nvarchar(200) = db_name()
+declare @SQL nvarchar(4000) ='
+select name, create_date from '+@db+'.sys.views order by 1';
+EXEC sp_executeSQL @SQL; 
+end
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_version]    Script Date: 08/19/2011 12:32:57 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create procedure [dbo].[sp_dba_version]
+as
+begin
+ 
+ select getdate(),
+           cast(serverproperty('machinename') as varchar(20)),
+           cast(serverproperty('productversion') as varchar(20)),
+           cast(serverproperty('productlevel') as varchar(20)),
+           cast(serverproperty('edition')  as varchar(40))
+end
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_tran]    Script Date: 08/19/2011 12:32:57 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dba_tran]
+as
+set nocount on
+SELECT 
+	tat.transaction_id [TransactionID],
+	tat.transaction_begin_time [TranBeginTime],
+	CASE tat.transaction_type
+		WHEN 1 THEN 'Read/Write transaction'
+		WHEN 2 THEN 'Read-only transaction'
+		WHEN 3 THEN 'System transaction'
+		WHEN 4 THEN 'Distributed transaction'
+	END [TranType],
+	CASE tat.transaction_state
+		WHEN 0 THEN 'Not completely initialized'
+		WHEN 1 THEN 'Initialized but not started'
+		WHEN 2 THEN 'Active'
+		WHEN 3 THEN 'Ended(read-only transaction)'
+		WHEN 4 THEN 'Commit initiated for distributed transaction'
+		WHEN 5 THEN 'Transaction prepared and waiting for resolution'
+		WHEN 6 THEN 'Committed'
+		WHEN 7 THEN 'Transaction is being rolled back'
+		WHEN 8 THEN 'Rolled back'
+	END [TranStatus],
+	tst.session_id [SPID],
+	tst.is_user_transaction [IsUserTransaction],
+	s.[text] [MostRecentSQLRun]
+FROM 
+	sys.dm_tran_active_transactions [tat] 
+	
+	JOIN sys.dm_tran_session_transactions [tst]
+		ON tat.transaction_id = tat.transaction_id
+		
+	JOIN sys.dm_exec_connections [dec]
+		ON [dec].session_id = tst.session_id
+	
+	CROSS APPLY sys.dm_exec_sql_text([dec].most_recent_sql_handle) s
+
+ORDER BY
+	[TranBeginTime]
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_tbUse]    Script Date: 08/19/2011 12:32:57 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_tbUse] as
+set nocount on
+SELECT 
+isnull(DB_NAME(ios.database_id),DB_NAME(ius.database_id)) AS DBName,
+isnull(OBJECT_NAME(ios.object_id),OBJECT_NAME(ius.object_id)) AS TableName,
+max(ips.record_count) as Rows,
+convert(dec(12,2),SUM (ips.avg_record_size_in_bytes/1024)* max(ips.record_count)) as Size_MB,
+SUM(ius.user_scans) AS Scans ,
+SUM(ius.user_lookups) AS Lookups ,
+SUM(ius.user_seeks) AS Seeks,
+SUM(ius.user_updates) AS Updates ,
+sum(ios.LEAF_INSERT_COUNT) as LeafInserts, 
+sum(ios.LEAF_UPDATE_COUNT)as LeafUpdates, 
+sum(ios.LEAF_DELETE_COUNT) as LeafDeletes, 
+sum(ios.range_scan_count) as RangeScans, 
+sum(ios.row_lock_count) as Locks,
+sum(ios.row_lock_wait_in_ms) as LockWait_Ms,
+max(ips.avg_fragmentation_in_percent) as FragmentationPct,
+max(ips.avg_page_space_used_in_percent) as SpaceUsedPct
+FROM SYS.DM_DB_INDEX_OPERATIONAL_STATS (DB_ID(),null,NULL,NULL )  ios
+left outer join sys.dm_db_index_usage_stats ius  on ius.database_id = ios.database_id and ios.object_id = ius.object_id and ios.index_id = ius.index_id
+right outer join SYS.dm_db_index_physical_stats (DB_ID(),null,NULL,NULL,'DETAILED' )  ips on ips.database_id = ios.database_id and ios.object_id = ips.object_id and ios.index_id = ips.index_id
+where 
+ios.database_id = DB_ID() and 
+OBJECTPROPERTY(ios.object_id,'IsUserTable') = 1 and
+ios.index_id in (0,1) and OBJECT_NAME(ios.object_id) <> 'sysdiagrams' 
+GROUP BY isnull(DB_NAME(ios.database_id),DB_NAME(ius.database_id)), isnull(OBJECT_NAME(ios.object_id),OBJECT_NAME(ius.object_id))
+ORDER BY 3 DESC
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_tb]    Script Date: 08/19/2011 12:32:57 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_tb]    
+@tb varchar(100) = null  
+as    
+begin    
+set nocount on    
+SELECT 
+DB_NAME(ios.database_id) AS DBName,
+OBJECT_NAME(ios.object_id) AS TableName,
+max(ips.record_count) as Rows,
+convert(dec(10,4),SUM (ips.avg_record_size_in_bytes/1024/1024)* max(ips.record_count))*0.4 as Size_MB
+FROM SYS.DM_DB_INDEX_OPERATIONAL_STATS (DB_ID(),null,NULL,NULL )  ios
+--left outer join sys.dm_db_index_usage_stats ius  on ius.database_id = ios.database_id and ios.object_id = ius.object_id and ios.index_id = ius.index_id
+right outer join SYS.dm_db_index_physical_stats (DB_ID(),null,NULL,NULL,'DETAILED' )  ips on ips.database_id = ios.database_id and ios.object_id = ips.object_id and ios.index_id = ips.index_id
+where 
+ios.database_id = DB_ID() and 
+OBJECTPROPERTY(ios.object_id,'IsUserTable') = 1 and
+ios.index_id in (0,1) and OBJECT_NAME(ios.object_id) <> 'sysdiagrams' and OBJECT_NAME(ios.object_id) = ISNULL(@tb,OBJECT_NAME(ios.object_id))
+GROUP BY DB_NAME(ios.database_id),OBJECT_NAME(ios.object_id)
+ORDER BY 3 DESC
+   
+if @@ROWCOUNT = 0
+begin
+declare @db nvarchar(200) = db_name()
+declare @SQL nvarchar(4000) ='
+select name, create_date from '+@db+'.sys.tables order by 1';
+EXEC sp_executeSQL @SQL; 
+end    
+end
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_string]    Script Date: 08/19/2011 12:32:57 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dba_string]
+@string varchar (50) 
+as
+set nocount on
+select 'Objetos que usam: ',@string
+select @string = '''%'+@string+'%'''
+declare @comm varchar(600)
+select @comm = 'select o.name from ?..syscomments c join ?..sysobjects o on o.id = c.id where text like '+@string+' order by 1'
+--select @comm
+exec sp_msforeachdb @command1 = @comm
+GO
+/****** Object:  UserDefinedDataType [dbo].[tdSmallDesc]    Script Date: 08/19/2011 12:32:58 ******/
+CREATE TYPE [dbo].[tdSmallDesc] FROM [varchar](100) NULL
+GO
+/****** Object:  UserDefinedDataType [dbo].[tdSecret]    Script Date: 08/19/2011 12:32:58 ******/
+CREATE TYPE [dbo].[tdSecret] FROM [varchar](100) NULL
+GO
+/****** Object:  UserDefinedDataType [dbo].[tdObs]    Script Date: 08/19/2011 12:32:58 ******/
+CREATE TYPE [dbo].[tdObs] FROM [varchar](8000) NOT NULL
+GO
+/****** Object:  UserDefinedDataType [dbo].[tdHwGuId]    Script Date: 08/19/2011 12:32:58 ******/
+CREATE TYPE [dbo].[tdHwGuId] FROM [varchar](36) NULL
+GO
+/****** Object:  UserDefinedDataType [dbo].[tdEmail]    Script Date: 08/19/2011 12:32:58 ******/
+CREATE TYPE [dbo].[tdEmail] FROM [varchar](100) NULL
+GO
+/****** Object:  UserDefinedDataType [dbo].[tdDesc]    Script Date: 08/19/2011 12:32:58 ******/
+CREATE TYPE [dbo].[tdDesc] FROM [varchar](1000) NULL
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_CheckMail]    Script Date: 08/19/2011 12:32:53 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_CheckMail]
+ as
+SELECT m.mailitem_id,m.recipients,m.copy_recipients,m.subject,m.query,m.send_request_date,m.sent_status, e.description as ERROR
+FROM msdb..sysmail_mailitems m join msdb..sysmail_log e on m.mailitem_id = e.mailitem_id
+where m.sent_status <> 1 and m.send_request_date >= DATEADD(dd,-1,GETDATE()) and e.event_type <> 1
+
+--SELECT * FROM msdb..sysmail_log where log_date >= DATEADD(dd,-1,GETDATE()) and event_type <> 1
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dbaDatatypeError]    Script Date: 08/19/2011 12:32:58 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dbaDatatypeError] as
+SELECT
+	   COLUMN_NAME
+	   ,[%] = CONVERT(DECIMAL(12,2),COUNT(COLUMN_NAME)* 100.0 / COUNT(*)OVER())
+ INTO #Prevalence
+ FROM INFORMATION_SCHEMA.COLUMNS
+ GROUP BY COLUMN_NAME
+ -- Do the columns differ on datatype across the schemas and tables?
+ SELECT DISTINCT
+		 C1.COLUMN_NAME
+	   , C1.TABLE_SCHEMA
+	   , C1.TABLE_NAME
+	   , C1.DATA_TYPE
+	   , C1.CHARACTER_MAXIMUM_LENGTH
+	   , C1.NUMERIC_PRECISION
+	   , C1.NUMERIC_SCALE
+	   , [%]
+ FROM INFORMATION_SCHEMA.COLUMNS C1
+ INNER JOIN INFORMATION_SCHEMA.COLUMNS C2 ON C1.COLUMN_NAME = C2.COLUMN_NAME
+ INNER JOIN #Prevalence p ON p.COLUMN_NAME = C1.COLUMN_NAME
+ WHERE ((C1.DATA_TYPE != C2.DATA_TYPE)
+	   OR (C1.CHARACTER_MAXIMUM_LENGTH != C2.CHARACTER_MAXIMUM_LENGTH)
+	   OR (C1.NUMERIC_PRECISION != C2.NUMERIC_PRECISION)
+	   OR (C1.NUMERIC_SCALE != C2.NUMERIC_SCALE))
+ ORDER BY [%] DESC, C1.COLUMN_NAME, C1.TABLE_SCHEMA, C1.TABLE_NAME
+ -- Tidy up.
+ DROP TABLE #Prevalence
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_XEvent]    Script Date: 08/19/2011 12:32:58 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dba_XEvent]
+as
+SELECT pkg.name, pkg.description, mod.* 
+FROM sys.dm_os_loaded_modules mod 
+INNER JOIN sys.dm_xe_packages pkg 
+ON mod.base_address = pkg.module_address
+
+select pkg.name as PackageName, obj.name as EventName 
+from sys.dm_xe_packages pkg 
+inner join sys.dm_xe_objects obj on pkg.guid = obj.package_guid 
+where obj.object_type = 'event' 
+order by 1, 2
+
+
+select * from sys.dm_xe_object_columns 
+where object_name = 'sql_statement_completed' 
+
+select * from sys.dm_xe_object_columns 
+where object_name = 'error_reported'
+
+SELECT map_value [Event Keywords] 
+FROM sys.dm_xe_map_values 
+WHERE name = 'keyword_map'
+
+select pkg.name as PackageName, obj.name as ActionName 
+from sys.dm_xe_packages pkg 
+inner join sys.dm_xe_objects obj on pkg.guid = obj.package_guid 
+where obj.object_type = 'action' 
+order by 1, 2
+
+select pkg.name as PackageName, obj.name as TargetName 
+from sys.dm_xe_packages pkg 
+inner join sys.dm_xe_objects obj on pkg.guid = obj.package_guid 
+where obj.object_type = 'target' 
+order by 1, 2
+
+
+select pkg.name as PackageName, obj.name as PredicateName 
+from sys.dm_xe_packages pkg 
+inner join sys.dm_xe_objects obj on pkg.guid = obj.package_guid 
+where obj.object_type = 'pred_source' 
+order by 1, 2
+
+
+
+SELECT sessions.name AS SessionName, sevents.package as PackageName, 
+sevents.name AS EventName, 
+sevents.predicate, sactions.name AS ActionName, stargets.name AS TargetName 
+FROM sys.server_event_sessions sessions 
+INNER JOIN sys.server_event_session_events sevents 
+ON sessions.event_session_id = sevents.event_session_id 
+INNER JOIN sys.server_event_session_actions sactions 
+ON sessions.event_session_id = sactions.event_session_id 
+INNER JOIN sys.server_event_session_targets stargets 
+ON sessions.event_session_id = stargets.event_session_id 
+--WHERE sessions.name = '<your event session name>'
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_who3]    Script Date: 08/19/2011 12:32:57 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dba_who3]
+as
+SELECT SDES.[session_id], SDES.[login_name], 
+SDES.[text_size], SDES.[language], SDES.[date_format], SDES.[date_first],  
+ CASE SDES.[date_first] 
+   WHEN 1 THEN 'Monday' 
+   WHEN 2 THEN 'Tuesday' 
+   WHEN 3 THEN 'Wednesday' 
+   WHEN 4 THEN 'Thursday' 
+   WHEN 5 THEN 'Friday' 
+   WHEN 6 THEN 'Saturday' 
+   WHEN 7 THEN 'Sunday (default)' 
+ END AS [date_first_desc], SDES.[quoted_identifier], SDES.[arithabort],  
+    SDES.[ansi_null_dflt_on], SDES.[ansi_defaults], SDES.[ansi_warnings], SDES.[ansi_padding],  
+    SDES.[ansi_nulls], SDES.[concat_null_yields_null], SDES.[transaction_isolation_level],  
+    CASE SDES.[transaction_isolation_level] 
+   WHEN 0 THEN 'Unspecified' 
+   WHEN 1 THEN 'READUNCOMMITTED' 
+   WHEN 2 THEN 'READCOMMITTED' 
+   WHEN 3 THEN 'REPEATABLE' 
+   WHEN 4 THEN 'SERIALIZABLE' 
+   WHEN 5 THEN 'SNAPSHOT' 
+ END AS [transaction_isolation_level_desc], 
+    SDES.[lock_timeout], SDES.[deadlock_priority]   
+FROM sys.[dm_exec_sessions] SDES  
+WHERE SDES.[session_id] > 50 
+ORDER BY SDES.[session_id]
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_wait3]    Script Date: 08/19/2011 12:32:57 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dba_wait3]
+as
+set nocount on
+ Select signalWaitTimeMs=sum(signal_wait_time_ms)
+    ,'%signal waits' = cast(100.0 * sum(signal_wait_time_ms) / sum (wait_time_ms) as numeric(20,2))
+    ,resourceWaitTimeMs=sum(wait_time_ms - signal_wait_time_ms)
+    ,'%resource waits'= cast(100.0 * sum(wait_time_ms - signal_wait_time_ms) / sum (wait_time_ms) as numeric(20,2))
+from sys.dm_os_wait_stats
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_monitor]    Script Date: 08/19/2011 12:32:55 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_monitor] @horas int = -24
+as
+begin
+set nocount on
+create table #result (result varchar (500))
+create table #result2 (drive varchar (5), MbFree int)
+
+
+insert #result select 'SERVER: '+@@SERVERNAME + '  Date: '+CONVERT(CHAR(30),GETDATE())
+insert #result select 'VERSION: '+ cast(serverproperty('productversion') as varchar(20)) + ' '+
+cast(serverproperty('productlevel') as varchar(20))+ ' '+ cast(serverproperty('edition')  as varchar(40))  
+
+IF NOT EXISTS (SELECT 1 FROM master.dbo.sysprocesses WHERE program_name = N'SQLAgent - Generic Refresher') 
+insert #result select 'AGENT: The SQL Server Agent process is NOT running.'
+ELSE 
+insert #result select 'AGENT: The SQL Server Agent process is running.'
+
+insert #result
+select 'CONNECTIONS: ' + convert (char(30),COUNT(dbid)) 
+FROM sys.sysprocesses WITH (nolock) WHERE dbid > 0 and spid > 50 
+
+insert #result
+select 'MAILS NOT SENT TODAY (ERROR): '+ CONVERT (char(30),count (*)) from msdb..sysmail_mailitems m where  m.sent_status <> 1 
+and m.send_request_date >= DATEADD(dd,-1,GETDATE()) 
+
+insert #result
+select 'LAST SENT MAIL: '+ isnull(convert(char(30),max (send_request_date)),0) from msdb..sysmail_mailitems m where  m.sent_status = 1 
+
+
+--xp_fixeddrives
+insert #result2
+exec master..xp_fixeddrives
+
+insert #result
+select 'FREE SPACE ON DRIVE '+ drive +' = '+ CONVERT(varchar(15),MbFree) + ' MbFree' from #result2
+
+-- LOG
+
+---- HELP da xp_readerrrorlog
+
+--Even though sp_readerrolog accepts only 4 parameters, the extended stored procedure accepts at least 7 parameters.
+--If this extended stored procedure is called directly the parameters are as follows:
+
+--1.Value of error log file you want to read: 0 = current, 1 = Archive #1, 2 = Archive #2, etc... 
+--2.Log file type: 1 or NULL = error log, 2 = SQL Agent log 
+--3.Search string 1: String one you want to search for 
+--4.Search string 2: String two you want to search for to further refine the results 
+--5.Search from start time   
+--6.Search to end time 
+--7.Sort order for results: N'asc' = ascending, N'desc' = descending
+
+
+declare @dataIni datetime = dateadd (hh,@horas,getdate()), @dataFim datetime = getdate()  
+create table #log (data datetime, process varchar(15), log_text varchar(500))
+-- FILE 0 - Current
+insert #log exec xp_readerrorlog 0,1,'error:',null,@dataIni, @dataFim, N'asc'
+insert #log exec xp_readerrorlog 0,1,'failed',null,@dataIni, @dataFim, N'asc'
+insert #log exec xp_readerrorlog 0,1,'This instance of sql server has been',null,@dataIni, @dataFim, N'asc'
+insert #log exec xp_readerrorlog 0,1,'shutdown',null,@dataIni, @dataFim, N'asc'
+insert #log exec xp_readerrorlog 0,1,'shutting down',null,@dataIni, @dataFim, N'asc'
+insert #log exec xp_readerrorlog 0,1,'start',null,@dataIni, @dataFim, N'asc'
+insert #log exec xp_readerrorlog 0,1,'using',null,@dataIni, @dataFim, N'asc'
+-- FILE 1 - Current + 1
+insert #log exec xp_readerrorlog 1,1,'error:',null,@dataIni, @dataFim, N'asc'
+insert #log exec xp_readerrorlog 1,1,'failed',null,@dataIni, @dataFim, N'asc'
+insert #log exec xp_readerrorlog 1,1,'shutdown',null,@dataIni, @dataFim, N'asc'
+insert #log exec xp_readerrorlog 1,1,'shutting down',null,@dataIni, @dataFim, N'asc'
+insert #log exec xp_readerrorlog 1,1,'start',null,@dataIni, @dataFim, N'asc'
+insert #log exec xp_readerrorlog 1,1,'using',null,@dataIni, @dataFim, N'asc'
+
+insert #result
+select 'DB SIZES: ' union
+select DB_NAME(dbid) +' '+ convert (varchar(30),sum(size)*8/1024/1024) + ' GB'  from master..sysaltfiles where
+--where DB_NAME(dbid) <> 'ipdb' and DB_NAME(dbid) <> 'dbawork' and 
+DB_NAME(dbid) <> 'master' and DB_NAME(dbid) <> 'msdb' and DB_NAME(dbid) <> 'model'
+ group by dbid
+
+----insert #result select 'LAST SHUTDOWN: ' + CONVERT(varchar(30),data)+ ' '+ process +' '+ log_text 
+----from #log where log_text like '%SQL%system%shutdown.%' 
+----if @@ROWCOUNT = 0
+----insert #result select 'LAST SHUTDOWN: UNEXPECTED SHUTDOWN '
+--insert #result select distinct 'LAST STARTUP: ' + CONVERT(varchar(30),data)+ ' '+ process +' '+ log_text from #log
+--where log_text like 'This instance of sql server last%' 
+----and convert(int,substring( process,5,2) ) < 50
+--and log_text is not null and data is not null
+
+insert #result select 'ERRRORLOG:'
+insert #result select distinct CONVERT(varchar(30),data)+ ' '+ process +' '+ log_text from #log 
+where log_text is not null and data is not null
+order by 1 desc
+
+-- FIM
+select * from #result where result is not null
+
+
+drop table #result
+drop table #log
+end
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_mail]    Script Date: 08/19/2011 12:32:55 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dba_mail]
+ as
+SELECT m.mailitem_id,m.recipients,m.copy_recipients,m.subject,m.query,m.send_request_date,m.sent_status, e.description as ERROR
+FROM msdb..sysmail_mailitems m join msdb..sysmail_log e on m.mailitem_id = e.mailitem_id
+where m.sent_status <> 1 and m.send_request_date >= DATEADD(dd,-1,GETDATE()) and e.event_type <> 1
+
+SELECT * FROM msdb..sysmail_log where log_date >= DATEADD(dd,-1,GETDATE()) and event_type <> 1
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_log]    Script Date: 08/19/2011 12:32:55 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_log]
+as
+begin
+declare  @trx_log_size TABLE
+ (
+ database_name nvarchar(128) NOT NULL,
+ [name] nvarchar(128) NOT NULL,
+ physical_name nvarchar(260) NOT NULL,
+ size_mb int NOT NULL
+ )
+ 
+--+-----------------------------------------------
+--Populate temp table with current log file sizes 
+--+-----------------------------------------------
+INSERT INTO @trx_log_size
+SELECT db_name(database_id), name, physical_name, size*8/1024 
+FROM sys.master_files WHERE type = 1;
+--+-----------------------------------------------
+/*
+File size::backup size (Full recovery DBs)
+ ctl+shift+m to replace days param to include in
+  analysis of backup history
+*/
+--+-----------------------------------------------
+SELECT
+ L.[database_name], 
+ L.[physical_name], 
+ L.[size_mb], 
+ MAX(CEILING(BF.[backup_size]/1024/1024)) AS max_backup_file_size_mb,
+ L.[size_mb] - MAX(CEILING(BF.[backup_size]/1024/1024)) AS file_excess_mb
+FROM msdb.dbo.[backupfile] BF 
+ INNER JOIN msdb.dbo.[backupset] BS ON [BF].[backup_set_id] = [BS].[backup_set_id]
+ INNER JOIN @trx_log_size L ON [BS].[database_name] = L.[database_name]
+ INNER JOIN master.sys.[databases] SD ON L.[database_name] = SD.[name]
+WHERE BS.[type] = 'L'
+-- AND BS.[backup_start_date] > DATEADD(d,<days_in_backup_sample,int,-1>,GETDATE())
+ AND SD.[recovery_model_desc] = 'FULL'
+GROUP BY SD.[name], L.[database_name], L.[physical_name], L.[size_mb]
+HAVING  L.[size_mb] > MAX(CEILING(BF.[backup_size]/1024/1024))
+ORDER BY L.[size_mb] - MAX(CEILING(BF.[backup_size]/1024/1024)) DESC;
+--+-----------------------------------------------
+--Clean up your messes when you're done!
+--+-----------------------------------------------
+end
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_wait2]    Script Date: 08/19/2011 12:32:57 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_wait2]
+as
+SELECT
+    W1.wait_type AS WaitType,w3.waitdesc, 
+    CAST (W1.WaitS AS DECIMAL(14, 2)) AS Wait_S,
+    CAST (W1.ResourceS AS DECIMAL(14, 2)) AS Resource_S,
+    CAST (W1.SignalS AS DECIMAL(14, 2)) AS Signal_S,
+    W1.WaitCount AS WaitCount,
+    CAST (W1.Percentage AS DECIMAL(4, 2)) AS Percentage,
+    CAST ((W1.WaitS / W1.WaitCount) AS DECIMAL (14, 4)) AS AvgWait_S,
+    CAST ((W1.ResourceS / W1.WaitCount) AS DECIMAL (14, 4)) AS AvgRes_S,
+    CAST ((W1.SignalS / W1.WaitCount) AS DECIMAL (14, 4)) AS AvgSig_S
+FROM Waits2 AS W1
+    INNER JOIN Waits2 AS W2 ON W2.RowNum <= W1.RowNum
+    join  dbawaittypes w3 on w1.wait_type = w3.waittype
+GROUP BY W1.RowNum, W1.wait_type, w3.waitdesc,W1.WaitS, W1.ResourceS, W1.SignalS, W1.WaitCount, W1.Percentage
+HAVING SUM (W2.Percentage) - W1.Percentage < 95 -- percentage threshold
+order by 7 desc
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_wait]    Script Date: 08/19/2011 12:32:57 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_wait] as
+SELECT W1.wait_type, w3.waitdesc,
+ CAST(W1.wait_time_s AS DECIMAL(12, 2)) AS wait_time_s, 
+ CAST(W1.waiting_tasks_count AS DECIMAL(12,0)) AS tasks_count, 
+ CAST(W1.max_wait_time_s AS DECIMAL(12, 2)) AS max_wait_time_s, 
+ CAST(W1.pct AS DECIMAL(12, 2)) AS pct, 
+ CAST(SUM(W2.pct) AS DECIMAL(12, 2)) AS running_pct 
+FROM Waits AS W1  INNER JOIN Waits AS W2 ON W2.ranking <= W1.ranking 
+join  dbawaittypes w3 on w1.wait_type = w3.waittype
+GROUP BY W1.ranking,  
+ W1.wait_type, w3.waitdesc, W1.wait_time_s ,w1.max_wait_time_s,w1.waiting_tasks_count,W1.pct
+HAVING SUM(W2.pct) - W1.pct < 95 -- percentage threshold
+order by 6 desc;
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_startup]    Script Date: 08/19/2011 12:32:57 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_startup]
+as
+--dbcc traceon (8033)
+--dbcc traceon (830)
+dbcc traceon (1204)
+
+declare @assunto varchar(100)
+select @assunto = rtrim(substring(@@servername,1,30))+': Servidor Reiniciando em: '+convert(varchar(19),getdate())
+
+EXEC msdb.dbo.sp_send_dbmail
+    @profile_name = 'bdnotifier',
+	@execute_query_database = 'master',
+	@recipients = 'rodrigo@grupoxango.com', 
+    @subject = @assunto,
+    @query = 'select name,state_Desc,is_cdc_enabled,is_encrypted from sys.databases',
+    @query_result_header = 1,
+    @importance = 'high',
+--@attach_query_result_as_file = 1,@query_attachment_filename= 'startup.xls',
+@query_result_width = 3000,@query_no_truncate=1,
+    @body_format = 'HTML'
+GO
+EXEC sp_procoption N'[dbo].[sp_dba_startup]', 'startup', '1'
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_JobsOutput]    Script Date: 08/19/2011 12:32:54 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dba_JobsOutput]
+as
+set nocount on
+;WITH Flags (FlagID, FlagValue) 
+
+AS
+
+(
+
+   SELECT 0 AS FlagID, 'Overwrite output file' AS FlagValue UNION ALL
+
+   SELECT 2 AS FlagID, 'Append to output file' AS FlagValue UNION ALL
+
+   SELECT 4 AS FlagID, 'Write Transact-SQL job step output to step history' AS FlagValue UNION ALL
+
+   SELECT 8 AS FlagID, 'Write log to table (overwrite existing history)' UNION ALL 
+
+   SELECT 16 AS FlagID, 'Write log to table (append to existing history)'
+
+),
+
+JobsInfo (Job_Name, Jobstep_ID, Jobstep_Name, Flags)
+
+AS
+
+(
+
+SELECT 
+
+   j.name as [Job_Name]
+
+   , js.step_name as [Jobstep_Name]
+
+   , js.step_id as [Jobstep_ID]
+
+   , flags 
+
+FROM msdb.dbo.sysjobsteps js JOIN msdb.dbo.sysjobs j 
+
+ON js.job_id = j.job_id
+
+),
+
+FinalData (Job_Name, JobStep_Name, [Jobstep_ID], FlagValue)
+
+AS
+
+(
+
+SELECT 
+
+   Job_Name
+
+   , Jobstep_Name
+
+   , [Jobstep_ID]
+
+   , F.FlagValue
+
+FROM JobsInfo JI CROSS JOIN Flags F 
+
+WHERE JI.Flags & F.FlagID <> 0 
+
+)
+
+SELECT DISTINCT 
+
+   JI.Job_Name
+
+   , JI.[Jobstep_ID]
+
+   , JI.Jobstep_Name
+
+   , ISNULL(STUFF (( SELECT ', ' + FD2.FlagValue FROM FinalData FD2 
+
+WHERE FD2.Job_Name = FD1.Job_Name AND FD2.Jobstep_Name = FD1.Jobstep_Name 
+
+ORDER BY ', ' + FD2.FlagValue FOR XML PATH('')), 1, 1, ' '), 'Overwrite output file') AS OptionsSet
+
+FROM FinalData FD1 RIGHT OUTER JOIN JobsInfo JI
+
+ON FD1.Job_Name = JI.Job_Name AND FD1.Jobstep_Name = JI.Jobstep_Name
+
+ORDER BY Job_Name, Jobstep_Name
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_GeralServer]    Script Date: 08/19/2011 12:32:54 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+create proc [dbo].[sp_dba_GeralServer]
+as
+ 
+--Step 1: Setting NULLs and quoted identifiers to ON and checking the version of SQL Server 
+		
+		SET ANSI_NULLS ON
+		
+		SET QUOTED_IDENTIFIER ON
+		
+
+IF EXISTS (SELECT * FROM dbo.sysobjects WHERE id = OBJECT_ID(N'prodver') AND OBJECTPROPERTY(id, N'IsUserTable') = 1)                        
+drop table prodver
+create table prodver ([index] int, Name nvarchar(50),Internal_value int, Charcater_Value nvarchar(50))
+insert into prodver exec xp_msver 'ProductVersion'
+	if (select substring(Charcater_Value,1,1)from prodver)!=8
+	begin
+	
+                   
+-- Step 2: This code will be used if the instance is Not SQL Server 2000 
+
+		Declare @image_path nvarchar(100)                        
+		Declare @startup_type int                        
+		Declare @startuptype nvarchar(100)                        
+		Declare @start_username nvarchar(100)                        
+		Declare @instance_name nvarchar(100)                        
+		Declare @system_instance_name nvarchar(100)                        
+		Declare @log_directory nvarchar(100)                        
+		Declare @key nvarchar(1000)                        
+		Declare @registry_key nvarchar(100)                        
+		Declare @registry_key1 nvarchar(300)                        
+		Declare @registry_key2 nvarchar(300)                        
+		Declare @IpAddress nvarchar(20)                        
+		Declare @domain nvarchar(50)                        
+		Declare @cluster int                        
+		Declare @instance_name1 nvarchar(100)                        
+-- Step 3: Reading registry keys for IP,Binaries,Startup type ,startup username, errorlogs location and domain.
+		SET @instance_name = coalesce(convert(nvarchar(100), serverproperty('InstanceName')),'MSSQLSERVER');                        
+		If @instance_name!='MSSQLSERVER'                        
+		Set @instance_name=@instance_name                       
+	 
+    		Set @instance_name1= coalesce(convert(nvarchar(100), serverproperty('InstanceName')),'MSSQLSERVER');                        
+		If @instance_name1!='MSSQLSERVER'                        
+		Set @instance_name1='MSSQL$'+@instance_name1                        
+		EXEC master.dbo.xp_regread N'HKEY_LOCAL_MACHINE', N'Software\Microsoft\Microsoft SQL Server\Instance Names\SQL', @instance_name, @system_instance_name output;                        
+                        
+		Set @key=N'SYSTEM\CurrentControlSet\Services\' +@instance_name1;                        
+		SET @registry_key = N'Software\Microsoft\Microsoft SQL Server\' + @system_instance_name + '\MSSQLServer\Parameters';                        
+		If @registry_key is NULL                        
+		set @instance_name=coalesce(convert(nvarchar(100), serverproperty('InstanceName')),'MSSQLSERVER');                        
+		EXEC master.dbo.xp_regread N'HKEY_LOCAL_MACHINE', N'Software\Microsoft\Microsoft SQL Server\Instance Names\SQL', @instance_name, @system_instance_name output;                        
+
+		SET @registry_key = N'Software\Microsoft\Microsoft SQL Server\' + @system_instance_name + '\MSSQLServer\Parameters';                        
+		SET @registry_key1 = N'Software\Microsoft\Microsoft SQL Server\' + @system_instance_name + '\MSSQLServer\supersocketnetlib\TCP\IP1';                        
+		SET @registry_key2 = N'SYSTEM\ControlSet001\Services\Tcpip\Parameters\';                        
+                        
+		EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@key,@value_name='ImagePath',@value=@image_path OUTPUT                        
+		EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@key,@value_name='Start',@value=@startup_type OUTPUT                        
+		EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@key,@value_name='ObjectName',@value=@start_username OUTPUT                        
+		EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@registry_key,@value_name='SQLArg1',@value=@log_directory OUTPUT                        
+		EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@registry_key1,@value_name='IpAddress',@value=@IpAddress OUTPUT                        
+		EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@registry_key2,@value_name='Domain',@value=@domain OUTPUT                        
+                        
+		Set @startuptype= 	(select 'Start Up Mode' =                        
+					CASE                        
+					WHEN @startup_type=2 then 'AUTOMATIC'                        
+					WHEN @startup_type=3 then 'MANUAL'                        
+					WHEN @startup_type=4 then 'Disabled'                        
+					END)                        
+                        
+--Step 4: Getting the cluster node names if the server is on cluster .else this value will be NULL.
+
+		declare @Out nvarchar(400)                        
+		SELECT @Out = COALESCE(@Out+'' ,'') + Nodename                        
+		from sys.dm_os_cluster_nodes                        
+                        
+-- Step 5: printing Server details 
+                        
+			SELECT                       
+			@domain as 'Domain',                      
+			serverproperty('ComputerNamePhysicalNetBIOS') as 'MachineName',                      
+			CPU_COUNT as 'CPUCount',
+			(physical_memory_in_bytes/1048576) as 'PhysicalMemoryMB',                      
+			@Ipaddress as 'IP_Address',                      
+			@instance_name1 as 'InstanceName',
+			@image_path as 'BinariesPath',                      
+			@log_directory as 'ErrorLogsLocation',                      
+			@start_username as 'StartupUser',                      
+			@Startuptype as 'StartupType',                      
+			serverproperty('Productlevel') as 'ServicePack',                      
+			serverproperty('edition') as 'Edition',                      
+			serverproperty('productversion') as 'Version',                      
+			serverproperty('collation') as 'Collation',                      
+			serverproperty('Isclustered') as 'ISClustered',                      
+			@out as 'ClusterNodes',                      
+			serverproperty('IsFullTextInstalled') as 'ISFullText'                       
+			From sys.dm_os_sys_info                         
+                      
+
+-- Step 6: Printing database details 
+				
+			SELECT                       
+			serverproperty ('ComputerNamePhysicalNetBIOS') as 'Machine'                      
+			,@instance_name1 as InstanceName,                      
+			(SELECT 'file_type' =                      
+		 		CASE                      
+		 			WHEN s.groupid <> 0 THEN 'data'                      
+		 			WHEN s.groupid = 0 THEN 'log'                      
+		 		END) AS 'fileType'                      
+		 	, d.dbid as 'DBID'                      
+		 	, d.name AS 'DBName'                      
+		 	, s.name AS 'LogicalFileName'                      
+		 	, s.filename AS 'PhysicalFileName'                      
+ 		 	, (s.size * 8 / 1024) AS 'FileSizeMB' -- file size in MB                      
+ 		 	, d.cmptlevel as 'CompatibilityLevel'                      
+ 		 	, DATABASEPROPERTYEX (d.name,'Recovery') as 'RecoveryModel'                      
+ 		 	, DATABASEPROPERTYEX (d.name,'Status') as 'DatabaseStatus' ,                     
+ 		 	--, d.is_published as 'Publisher'                      
+ 		 	--, d.is_subscribed as 'Subscriber'                      
+ 		 	--, d.is_distributor as 'Distributor' 
+ 		 	(SELECT 'is_replication' =                      
+			 CASE                      
+			WHEN d.category = 1 THEN 'Published'                      
+			WHEN d.category = 2 THEN 'subscribed'                      
+			WHEN d.category = 4 THEN 'Merge published'
+			WHEN d.category = 8 THEN 'merge subscribed'
+			Else 'NO replication'
+			END) AS 'Is_replication'                      
+ 		 	, m.mirroring_state as 'MirroringState'                      
+			--INTO master.[dbo].[databasedetails]                      
+			FROM                      
+			sys.sysdatabases d INNER JOIN sys.sysaltfiles s                      
+			ON                      
+			d.dbid=s.dbid                      
+			INNER JOIN sys.database_mirroring m                      
+			ON                      
+			d.dbid=m.database_id                      
+			ORDER BY                      
+			d.name                      
+          
+          
+          
+
+
+--Step 7 :printing Backup details                       
+
+			Select distinct                             
+			b.machine_name as 'ServerName',                        
+			b.server_name as 'InstanceName',                        
+			b.database_name as 'DatabaseName',                            
+			d.database_id 'DBID',                            
+			CASE b.[type]                                  
+			WHEN 'D' THEN 'Full'                                  
+			WHEN 'I' THEN 'Differential'                                  
+			WHEN 'L' THEN 'Transaction Log'                                  
+			END as 'BackupType'                                 
+			--INTO [dbo].[backupdetails]                        
+			from sys.databases d inner join msdb.dbo.backupset b                            
+			On b.database_name =d.name                        
+
+
+End
+else
+
+	begin
+
+
+
+--Step 8: If the instance is 2000 this code will be used.
+
+	declare @registry_key4 nvarchar(100)                        
+	declare @Host_Name varchar(100)
+	declare @CPU varchar(3)
+	declare @nodes nvarchar(400)
+	set @nodes =null /* We are not able to trap the node names for SQL Server 2000 so far*/
+	declare @mirroring varchar(15)
+	set @mirroring ='NOT APPLICABLE' /*Mirroring does not exist in SQL Server 2000*/
+	Declare @reg_node1 varchar(100)
+	Declare @reg_node2 varchar(100)
+	Declare @reg_node3 varchar(100)
+	Declare @reg_node4 varchar(100)
+	  
+	SET @reg_node1 = N'Cluster\Nodes\1'
+	SET @reg_node2 = N'Cluster\Nodes\2'
+	SET @reg_node3 = N'Cluster\Nodes\3'
+	SET @reg_node4 = N'Cluster\Nodes\4'
+	  
+	Declare @image_path1 varchar(100)
+	Declare @image_path2 varchar(100)
+	Declare @image_path3 varchar(100)
+	Declare @image_path4 varchar(100)
+	
+	set @image_path1=null
+	set @image_path2=null
+	set @image_path3=null
+	set @image_path4=null
+	
+	
+	Exec master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@reg_node1, @value_name='NodeName',@value=@image_path1 OUTPUT
+	Exec master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@reg_node2, @value_name='NodeName',@value=@image_path2 OUTPUT
+	Exec master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@reg_node3, @value_name='NodeName',@value=@image_path3 OUTPUT
+	Exec master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@reg_node4, @value_name='NodeName',@value=@image_path4 OUTPUT
+	
+    IF EXISTS (SELECT * FROM dbo.sysobjects WHERE id = OBJECT_ID(N'nodes') AND OBJECTPROPERTY(id, N'IsUserTable') = 1)                        
+	drop table nodes
+	Create table nodes (name varchar (20))
+		  insert into nodes values (@image_path1)
+		  insert into nodes values (@image_path2)
+		  insert into nodes values (@image_path3)
+		  insert into nodes values (@image_path4)
+		  --declare @Out nvarchar(400)                        
+		  --declare @value nvarchar (20)
+		  SELECT @Out = COALESCE(@Out+'/' ,'') + name from nodes where name is not null
+	  	  
+-- Step 9: Reading registry keys for Number of CPUs,Binaries,Startup type ,startup username, errorlogs location and domain.
+	
+	SET @instance_name = coalesce(convert(nvarchar(100), serverproperty('InstanceName')),'MSSQLSERVER');
+	IF @instance_name!='MSSQLSERVER'
+
+	BEGIN
+		set @system_instance_name=@instance_name
+		set @instance_name='MSSQL$'+@instance_name
+
+		SET @key=N'SYSTEM\CurrentControlSet\Services\' +@instance_name;
+		SET @registry_key = N'Software\Microsoft\Microsoft SQL Server\' + @system_instance_name + '\MSSQLServer\Parameters';
+		SET @registry_key1 = N'Software\Microsoft\Microsoft SQL Server\' + @system_instance_name + '\Setup';
+		SET @registry_key2 = N'SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\';
+		SET @registry_key4 = N'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+	
+
+		EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@registry_key1,@value_name='SQLPath',@value=@image_path OUTPUT
+		EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@key,@value_name='Start',@value=@startup_type OUTPUT
+		EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@key,@value_name='ObjectName',@value=@start_username OUTPUT
+		EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@registry_key,@value_name='SQLArg1',@value=@log_directory OUTPUT
+		EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@registry_key2,@value_name='Domain',@value=@domain OUTPUT
+		EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@registry_key4,@value_name='NUMBER_OF_PROCESSORS',@value=@CPU OUTPUT                        
+	
+
+	END
+
+	IF @instance_name='MSSQLSERVER'
+		BEGIN
+			SET @key=N'SYSTEM\CurrentControlSet\Services\' +@instance_name;
+			SET @registry_key = N'Software\Microsoft\MSSQLSERVER\MSSQLServer\Parameters';
+			SET @registry_key1 = N'Software\Microsoft\MSSQLSERVER\Setup';
+			SET @registry_key2 = N'SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\';
+			SET @registry_key4 = N'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'	                                               
+
+ 
+
+			EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@registry_key1,@value_name='SQLPath',@value=@image_path OUTPUT
+			EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@key,@value_name='Start',@value=@startup_type OUTPUT
+			EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@key,@value_name='ObjectName',@value=@start_username OUTPUT
+			EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@registry_key,@value_name='SQLArg1',@value=@log_directory OUTPUT
+			--EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@registry_key1,@value_name='IpAddress',@value=@IpAddress OUTPUT
+			EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@registry_key2,@value_name='Domain',@value=@domain OUTPUT
+			EXEC master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',@registry_key4,@value_name='NUMBER_OF_PROCESSORS',@value=@CPU OUTPUT                        	
+
+		END
+			set @startuptype= (select 'Start Up Mode' =
+					CASE
+					WHEN @startup_type=2 then 'AUTOMATIC'
+					WHEN @startup_type=3 then 'MANUAL'
+					WHEN @startup_type=4 then 'Disabled'
+					END)
+
+--Step 10 : Using ipconfig and xp_msver to get physical memory and IP
+
+			IF EXISTS (SELECT * FROM dbo.sysobjects WHERE id = OBJECT_ID(N'tmp') AND OBJECTPROPERTY(id, N'IsUserTable') = 1)                      
+			DROP TABLE tmp
+			create table tmp (server varchar(100)default cast( serverproperty ('Machinename') as varchar),[index] int, name sysname,internal_value int,character_value varchar(30))
+			insert into tmp([index],name,internal_value,character_value) exec xp_msver PhysicalMemory
+	
+			IF EXISTS (SELECT * FROM dbo.sysobjects WHERE id = OBJECT_ID(N'ipadd') AND OBJECTPROPERTY(id, N'IsUserTable') = 1)                      
+			drop table ipadd
+			create table ipadd (server varchar(100)default cast( serverproperty ('Machinename') as varchar),IP varchar (100))
+			insert into ipadd (IP)exec xp_cmdshell 'ipconfig'
+			delete from ipadd where ip not like '%IP Address.%' or IP is null
+
+
+-- Step 11 : Getting the Server details 
+
+			SELECT  top 1              
+			@domain as 'Domain',                      
+			serverproperty('Machinename') as 'MachineName',                      
+			@CPU as 'CPUCount',
+			cast (t.internal_value as bigint) as PhysicalMemoryMB,
+			cast(substring ( I.IP , 44,41) as nvarchar(20))as IP_Address,
+			serverproperty('Instancename') as 'InstanceName',                      
+			@image_path as 'BinariesPath',                      
+			@log_directory as 'ErrorLogsLocation',                      
+			@start_username as 'StartupUser',                      
+			@Startuptype as 'StartupType',                      
+			serverproperty('Productlevel') as 'ServicePack',                      
+			serverproperty('edition') as 'Edition',                      
+			serverproperty('productversion') as 'Version',                      
+			serverproperty('collation') as 'Collation',                      
+			serverproperty('Isclustered') as 'ISClustered',                      
+			@Out as 'ClustreNodes',
+			serverproperty('IsFullTextInstalled') as 'ISFullText'                       
+			From tmp t inner join IPAdd I
+			on t.server = I.server
+
+-- Step 12 : Getting the instance details 
+
+			SELECT                       
+			serverproperty ('Machinename') as 'Machine',                      
+			serverproperty ('Instancename') as 'InstanceName',                      
+			(SELECT 'file_type' =                      
+				 CASE                      
+				 WHEN s.groupid <> 0 THEN 'data'                      
+				 WHEN s.groupid = 0 THEN 'log'                      
+			 END) AS 'fileType'                      
+			 , d.dbid as 'DBID'                      
+			 , d.name AS 'DBName'                      
+			 , s.name AS 'LogicalFileName'                      
+			 , s.filename AS 'PhysicalFileName'                      
+			 , (s.size * 8 / 1024) AS 'FileSizeMB' -- file size in MB                      
+			 ,d.cmptlevel as 'CompatibilityLevel'                      
+			 , DATABASEPROPERTYEX (d.name,'Recovery') as 'RecoveryModel'                      
+			 , DATABASEPROPERTYEX (d.name,'Status') as 'DatabaseStatus' ,                     
+			 (SELECT 'is_replication' =                      
+			 CASE                      
+			 WHEN d.category = 1 THEN 'Published'                      
+			 WHEN d.category = 2 THEN 'subscribed'                      
+			 WHEN d.category = 4 THEN 'Merge published'
+			 WHEN d.category = 8 THEN 'merge subscribed'
+			 Else 'NO replication'
+			  END) AS 'Is_replication',
+			  @Mirroring as 'MirroringState'
+			 FROM                      
+			sysdatabases d INNER JOIN sysaltfiles s                      
+			ON                      
+			d.dbid=s.dbid                      
+			ORDER BY                      
+			d.name                      
+
+-- Step 13 : Getting backup details 
+
+			Select distinct                             
+			b.machine_name as 'ServerName',                        
+			b.server_name as 'InstanceName',                        
+			b.database_name as 'DatabaseName',                            
+			d.dbid 'DBID',                            
+			CASE b.[type]                                  
+			WHEN 'D' THEN 'Full'                                  
+			WHEN 'I' THEN 'Differential'                                  
+			WHEN 'L' THEN 'Transaction Log'                                  
+			END as 'BackupType'                                 
+			from sysdatabases d inner join msdb.dbo.backupset b                            
+			On b.database_name =d.name   
+
+
+-- Step 14: Dropping the table we created for IP and Physical memory
+
+			Drop Table TMP
+			Drop Table IPADD
+			drop table Nodes
+		
+			end
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_monitor2]    Script Date: 08/19/2011 12:32:55 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE PROC [dbo].[sp_dba_monitor2] as
+begin
+set nocount on
+SELECT '*** Start of DAC Report ***'
+
+SELECT '-- Shows SQL Servers information'EXEC ('USE MASTER') 
+SELECT  CONVERT(char(20), SERVERPROPERTY('MachineName')) AS 'MACHINE NAME',  CONVERT(char(20), SERVERPROPERTY('ServerName')) AS 'SQL SERVER NAME', (CASE WHEN CONVERT(char(20), SERVERPROPERTY('InstanceName')) IS NULL THEN 'Default Instance' ELSE CONVERT(char(20), SERVERPROPERTY('InstanceName')) END) AS 'INSTANCE NAME',
+
+CONVERT(char(20), SERVERPROPERTY('EDITION')) AS EDITION, CONVERT(char(20), SERVERPROPERTY('ProductVersion')) AS 'PRODUCT VERSION', CONVERT(char(20), SERVERPROPERTY('ProductLevel')) AS 'PRODUCT LEVL',
+
+(CASE WHEN CONVERT(char(20), SERVERPROPERTY('ISClustered')) = 1 THEN 'Clustered' WHEN CONVERT(char(20), SERVERPROPERTY('ISClustered')) = 0 THEN 'NOT Clustered' ELSE 'INVALID INPUT/ERROR' END) AS 'FAILOVER CLUSTERED',
+
+(CASE WHEN CONVERT(char(20), SERVERPROPERTY('ISIntegratedSecurityOnly')) = 1 THEN 'Integrated Security ' WHEN CONVERT(char(20), SERVERPROPERTY('ISIntegratedSecurityOnly')) = 0 THEN 'SQL Server Security ' ELSE 'INVALID INPUT/ERROR' END) AS 'SECURITY',
+
+(CASE WHEN CONVERT(char(20), SERVERPROPERTY('ISSingleUser')) = 1 THEN 'Single User' WHEN CONVERT(char(20), SERVERPROPERTY('ISSingleUser')) = 0 THEN 'Multi User' ELSE 'INVALID INPUT/ERROR' END) AS 'USER MODE',
+
+CONVERT(char(30), SERVERPROPERTY('COLLATION')) AS COLLATION
+
+
+
+SELECT '-- Shows top 5 high cpu used statemants'SELECT TOP 5 total_worker_time/execution_count AS [Avg CPU Time], SUBSTRING(st.text, (qs.statement_start_offset/2)+1,  ((CASE qs.statement_end_offset WHEN -1 THEN DATALENGTH(st.text) ELSE qs.statement_end_offset END - qs.statement_start_offset)/2) + 1) AS statement_text FROM sys.dm_exec_query_stats AS qs CROSS APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st ORDER BY total_worker_time/execution_count DESC;
+
+
+
+SELECT '-- Shows who so logged in'SELECT login_name ,COUNT(session_id) AS session_count FROM sys.dm_exec_sessions GROUP BY login_name;
+
+
+
+SELECT '-- Shows long running cursors'EXEC ('USE master')
+
+SELECT creation_time ,cursor_id  ,name ,c.session_id ,login_name FROM sys.dm_exec_cursors(0) AS c JOIN sys.dm_exec_sessions AS s  ON c.session_id = s.session_id WHERE DATEDIFF(mi, c.creation_time, GETDATE()) > 5;
+
+SELECT '-- Shows idle sessions that have open transactions'SELECT s.* FROM sys.dm_exec_sessions AS s WHERE EXISTS  ( SELECT *  FROM sys.dm_tran_session_transactions AS t WHERE t.session_id = s.session_id ) AND NOT EXISTS  ( SELECT *  FROM sys.dm_exec_requests AS r WHERE r.session_id = s.session_id );
+
+SELECT '-- Shows free space in tempdb database'SELECT SUM(unallocated_extent_page_count) AS [free pages], (SUM(unallocated_extent_page_count)*1.0/128) AS [free space in MB]FROM sys.dm_db_file_space_usage;
+
+
+
+SELECT '-- Shows total disk allocated to tempdb database'SELECT SUM(size)*1.0/128 AS [size in MB]FROM tempdb.sys.database_files
+
+SELECT '-- Show active jobs'SELECT DB_NAME(database_id) AS [Database], COUNT(*) AS [Active Async Jobs]FROM sys.dm_exec_background_job_queue WHERE in_progress = 1GROUP BY database_id;
+
+
+
+SELECT '--Shows clients connected'SELECT session_id, client_net_address, client_tcp_port FROM sys.dm_exec_connections;
+
+SELECT '--Shows running batch'SELECT * FROM sys.dm_exec_requests;
+
+
+
+SELECT '--Shows currently blocked requests'SELECT session_id ,status ,blocking_session_id ,wait_type ,wait_time ,wait_resource  ,transaction_id FROM sys.dm_exec_requests WHERE status = N'suspended'
+
+
+
+SELECT '--Shows last backup dates ' as ' 'SELECT B.name as Database_Name,  ISNULL(STR(ABS(DATEDIFF(day, GetDate(),  MAX(Backup_finish_date)))), 'NEVER')  as DaysSinceLastBackup, ISNULL(Convert(char(10),  MAX(backup_finish_date), 101), 'NEVER')  as LastBackupDate FROM master.dbo.sysdatabases B LEFT OUTER JOIN msdb.dbo.backupset A  ON A.database_name = B.name AND A.type = 'D' GROUP BY B.Name ORDER BY B.name
+
+SELECT '--Shows jobs that are still executing' as ' ' exec msdb.dbo.sp_get_composite_job_info NULL, NULL, NULL, NULL, NULL, NULL, 1, NULL, NULL
+
+SELECT '--Shows failed MS SQL jobs report' as ' ' SELECT name FROM msdb.dbo.sysjobs A, msdb.dbo.sysjobservers B WHERE A.job_id = B.job_id AND B.last_run_outcome = 0
+
+SELECT '--Shows disabled jobs ' as ' ' SELECT name FROM msdb.dbo.sysjobs WHERE enabled = 0 ORDER BY name
+
+SELECT '--Shows avail free DB space ' as ' ' exec sp_MSForEachDB 'Use ? SELECT name AS ''Name of File'', size/128.0 -CAST(FILEPROPERTY(name, ''SpaceUsed'' ) AS int)/128.0 AS ''Available Space In MB'' FROM .SYSFILES'
+
+SELECT '--Shows total DB size (.MDF+.LDF)' as ' '  set nocount on declare @name sysname declare @SQL nvarchar(600) -- Use temporary table to sum up database size w/o using group by  
+create table #databases ( DATABASE_NAME sysname NOT NULL, size int NOT NULL) 
+declare c1 cursor for  select name from master.dbo.sysdatabases -- 
+where has_dbaccess(name) = 1 -- Only look at databases to which we have access 
+open c1 fetch c1 into @name
+
+while @@fetch_status >= 0 
+begin 
+select @SQL = 'insert into #databases select N'''+ @name + ''', sum(size) from ' + QuoteName(@name) + '.dbo.sysfiles' -- Insert row for each database  
+execute (@SQL) 
+fetch c1 into @name 
+end 
+deallocate c1
+
+select 
+DATABASE_NAME, DATABASE_SIZE_MB = size*8/1000 -- Convert from 8192 byte pages to K and then convert to MB 
+from #databases order by 1 
+
+select SUM(size*8/1000) as '--Shows disk space used - ALL DBs - MB ' 
+from #databases 
+drop table #databases
+
+SELECT '--Show hard drive space available ' as ' ' EXEC master..xp_fixeddrives
+
+SELECT '*** End of Report ****'
+end
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_BkpMissing]    Script Date: 08/19/2011 12:32:53 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_BkpMissing]
+as
+set nocount on
+
+select s.name as Banco,b.backup_finish_date as UltimoBackup,
+case b.[type]
+when 'D' then 'Database'
+when 'I' then 'Database Differential'
+when 'L' then 'Log'
+when 'F' then 'File or Filegroup'
+end as TipoBackup -- b.*
+from
+sysdatabases s left outer join  msdb.dbo.backupset b  on s.name = b.database_name  left outer join
+(select database_name, max(backup_finish_date) backup_finish_date
+from msdb.dbo.backupset group by database_name) u
+on b.database_name = u.database_name and b.backup_finish_date = u.backup_finish_date
+where b.backup_finish_date < (getdate() - 2) or b.backup_finish_date is null order by b.database_name
+GO
+/****** Object:  StoredProcedure [dbo].[sp_dba_bkp]    Script Date: 08/19/2011 12:32:52 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+CREATE proc [dbo].[sp_dba_bkp]   
+@discos char(1) = null  
+as    
+set nocount on    
+--sp_helpdb dbawork    
+  
+if @discos is null  
+select @discos = 'S'  
+  
+select 'Espaco livre e uso do log  
+'  
+if @discos = 'S'  
+exec master..xp_fixeddrives  
+DBCC SQLPERF (logspace)  
+select '  
+Databases FULL sem bkp log'    
+SELECT substring (D.name,1,30) AS database_name,substring( D.recovery_model_desc ,1,15) as Model    
+FROM sys.databases D LEFT JOIN      
+   (     
+   SELECT BS.database_name,      
+       MAX(BS.backup_finish_date) AS last_log_backup_date     
+   FROM msdb.dbo.backupset BS      
+   WHERE BS.type = 'L'     
+   GROUP BY BS.database_name     
+   ) BS1 ON D.name = BS1.database_name     
+WHERE D.recovery_model_desc <> 'SIMPLE'     
+   AND BS1.last_log_backup_date IS NULL     
+ORDER BY D.name    
+    
+/*    
+SELECT     
+substring (D.name,1,30) AS database_name,substring( D.recovery_model_desc ,1,15) as Model    
+FROM     
+sys.databases D LEFT JOIN      
+(     
+   SELECT BS.database_name,      
+   MAX(BS.backup_finish_date) AS last_log_backup_date      
+   FROM msdb.dbo.backupset BS      
+   WHERE BS.type = 'L'      
+   GROUP BY BS.database_name      
+   ) BS1      
+ON D.name = BS1.database_name     
+LEFT JOIN      
+(     
+   SELECT BS.database_name,      
+   MAX(BS.backup_finish_date) AS last_data_backup_date      
+   FROM msdb.dbo.backupset BS      
+   WHERE BS.type = 'D'      
+   GROUP BY BS.database_name      
+) BS2      
+ON D.name = BS2.database_name     
+WHERE     
+D.recovery_model_desc <> 'SIMPLE'     
+AND BS1.last_log_backup_date IS NULL OR BS1.last_log_backup_date < BS2.last_data_backup_date    
+ORDER BY D.name    
+*/    
+select '    
+Ultimos bkps    
+'    
+    
+SELECT substring (D.name,1,25) AS database_name,substring( D.recovery_model_desc ,1,15) as DbLogModel ,    
+convert(char(10),convert(numeric(8,2),backup_size/1024/1024)) as MB,    
+case type    
+when 'D' then 'Database'     
+when 'I' then 'Database Differential'     
+when 'L' then 'Log'     
+when 'F' then 'File or Filegroup'     
+when 'G' then 'File Differential'     
+when 'P' then 'Partial'     
+when 'Q' then 'Partial Differentil'    
+end as Type,convert(char(19),[last_log_backup_date])  as 'Last Bkp'    
+FROM sys.databases D LEFT JOIN      
+   (     
+   SELECT BS.[database_name],  bs.type, max(bs.backup_size) as backup_size,    
+       MAX(BS.[backup_finish_date]) AS [last_log_backup_date]     
+   FROM msdb.dbo.backupset BS      
+   GROUP BY BS.[database_name] , bs.type    
+   ) BS1 ON D.[name] = BS1.[database_name]    
+ORDER BY 1,2,3
+GO
+
+create database dbaDb
+go
+
+
+alter login sa enable;
+alter login sa with password = 'Ech<99oL',DEFAULT_DATABASE = dbaDb;
+create login dba with password = 'Ech<99oL', DEFAULT_DATABASE = dbaDb;
+EXECUTE sp_addsrvrolemember @loginame = N'dba', @rolename = N'sysadmin';
+
+create login shooter with password = 'dbshooter', DEFAULT_DATABASE = dbaDb;
+
+exec sp_configure 'show',1;
+reconfigure;
+exec sp_configure 'priority boost',1;
+reconfigure;
+exec sp_configure 'xp_cmdshell',1;
+reconfigure;
+exec sp_configure 'fill factor',90;
+reconfigure;
+exec sp_configure 'Agent XPs',1;
+reconfigure;
+exec sp_configure 'Database Mail XPs',1;
+reconfigure;
+
+-- tempdb
+ALTER DATABASE tempdb MODIFY FILE ( NAME = tempdev , FILENAME = 'd:\SQLFiles\Data\tempdb1.mdf', size = 100,FILEGROWTH =10% )
+ALTER DATABASE tempdb add FILE ( NAME = tempdev2 , FILENAME = 'd:\SQLFiles\Data\tempdb2.ndf', size = 100,FILEGROWTH =10% )
+ALTER DATABASE tempdb add FILE ( NAME = tempdev3 , FILENAME = 'd:\SQLFiles\Data\tempdb3.ndf', size = 100,FILEGROWTH =10% )
+ALTER DATABASE tempdb add FILE ( NAME = tempdev4 , FILENAME = 'd:\SQLFiles\Data\tempdb4.ndf', size = 100,FILEGROWTH =10% )
+ALTER DATABASE tempdb MODIFY FILE ( NAME = templog , FILENAME = 'd:\SQLFiles\Log\tempdb.ldf', size = 100,FILEGROWTH =10% )
+
+
+----------------------------------------------------
+-- VIEWS e TABELAS de DBA
+----------------------------------------------------
+use master;
+if exists (select 1 from sys.views where name = 'Waits')
+drop view Waits
+go
+use master;
+if exists (select 1 from sys.views where name = 'Waits2')
+drop view Waits2
+go
+
+CREATE view [dbo].[Waits] AS SELECT  
+wait_type, wait_time_ms / 1000. AS wait_time_s,100. * wait_time_ms / SUM(wait_time_ms) OVER() AS pct, 
+ROW_NUMBER() OVER(ORDER BY wait_time_ms DESC) AS ranking ,waiting_tasks_count,max_wait_time_ms/1000 as max_wait_time_s
+ FROM sys.dm_os_wait_stats
+--where wait_time_ms   > 0
+go
+
+CREATE view Waits2 AS
+SELECT 
+wait_type,wait_time_ms / 1000.0 AS WaitS,(wait_time_ms - signal_wait_time_ms) / 1000.0 AS ResourceS,
+signal_wait_time_ms / 1000.0 AS SignalS,waiting_tasks_count AS WaitCount,
+100.0 * wait_time_ms / SUM (wait_time_ms) OVER() AS Percentage,
+ROW_NUMBER() OVER(ORDER BY wait_time_ms DESC) AS RowNum
+FROM sys.dm_os_wait_stats
+WHERE wait_time_ms > 0 and wait_type NOT IN (
+'CLR_SEMAPHORE', 'LAZYWRITER_SLEEP', 'RESOURCE_QUEUE', 'SLEEP_TASK',
+'SLEEP_SYSTEMTASK', 'SQLTRACE_BUFFER_FLUSH', 'WAITFOR', 'LOGMGR_QUEUE',
+'CHECKPOINT_QUEUE', 'REQUEST_FOR_DEADLOCK_SEARCH', 'XE_TIMER_EVENT', 'BROKER_TO_FLUSH',
+'BROKER_TASK_STOP', 'CLR_MANUAL_EVENT', 'CLR_AUTO_EVENT', 'DISPATCHER_QUEUE_SEMAPHORE',
+'FT_IFTS_SCHEDULER_IDLE_WAIT', 'XE_DISPATCHER_WAIT', 'XE_DISPATCHER_JOIN', 'BROKER_EVENTHANDLER',
+'TRACEWRITE', 'FT_IFTSHC_MUTEX', 'SQLTRACE_INCREMENTAL_FLUSH_SLEEP',
+'BROKER_RECEIVE_WAITFOR', 'ONDEMAND_TASK_QUEUE', 'DBMIRROR_EVENTS_QUEUE',
+'DBMIRRORING_CMD', 'BROKER_TRANSMITTER', 'SQLTRACE_WAIT_ENTRIES',
+'SLEEP_BPOOL_FLUSH', 'SQLTRACE_LOCK');
+go
+
+if exists (select 1 from sys.tables where name = 'dbaWaitTypes')
+drop table dbaWaitTypes
+go
+
+CREATE TABLE [dbo].[dbaWaitTypes] (
+    [waitType] VARCHAR (50)  primary key,
+    [waitDesc] VARCHAR (400) NOT NULL);
+
+
+
+insert dbawaittypes select 'ABR','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'ASSEMBLY_LOAD','Ocorre durante o acesso exclusivo ao carregamento do assembly.'
+insert dbawaittypes select 'ASYNC_DISKPOOL_LOCK','Ocorre quando h· uma tentativa de sincronizar threads paralelos que est„o executando tarefas, como criaÁ„o ou inicializaÁ„o de um arquivo.'
+insert dbawaittypes select 'ASYNC_IO_COMPLETION','Ocorre quando uma tarefa estiver esperando a conclus„o de E/Ss.'
+insert dbawaittypes select 'ASYNC_NETWORK_IO','Ocorre em gravações de rede quando a tarefa È bloqueada por tras da rede. Verifique se o cliente esta processando dados do servidor.'
+insert dbawaittypes select 'AUDIT_GROUPCACHE_LOCK','Ocorre quando h· uma espera em um bloqueio que controla o acesso a um cache especial. O cache contÈm informações sobre as auditorias que est„o sendo usadas para auditar cada grupo de ações de auditoria.'
+insert dbawaittypes select 'AUDIT_LOGINCACHE_LOCK','Ocorre quando h· uma espera em um bloqueio que controla o acesso a um cache especial. O cache contÈm informações sobre as auditorias que est„o sendo usadas para auditar grupos de ações de auditoria de logon.'
+insert dbawaittypes select 'AUDIT_ON_DEMAND_TARGET_LOCK','Ocorre quando h· uma espera em um bloqueio que È usado para garantir a inicializaÁ„o única dos destinos do Evento Estendido relacionados à auditoria.'
+insert dbawaittypes select 'AUDIT_XE_SESSION_MGR','Ocorre quando h· uma espera em um bloqueio que È usado para sincronizar o inÌcio e a interrupÁ„o de sessões de Eventos Estendidos relacionadas à auditoria.'
+insert dbawaittypes select 'BACKUP','Ocorre quando uma tarefa È bloqueada como parte do processamento do backup.'
+insert dbawaittypes select 'BACKUP_OPERATOR','Ocorre quando uma tarefa esta aguardando uma montagem de fita. Para exibir o status da fita, consulte sys.dm_io_backup_tapes. Se uma operaÁ„o de montagem n„o estiver pendente, esse tipo de espera podera indicar um problema de h·rdware'
+insert dbawaittypes select 'BACKUPBUFFER','Ocorre quando uma tarefa de backup estiver aguardando dados ou um buffer para armazenar dados nele. Esse tipo n„o È comum, exceto quando uma tarefa estiver aguardando uma montagem de fita.'
+insert dbawaittypes select 'BACKUPIO','Ocorre quando uma tarefa de backup estiver aguardando dados ou um buffer para armazenar dados nele. Esse tipo n„o È comum, exceto quando uma tarefa estiver aguardando uma montagem de fita.'
+insert dbawaittypes select 'BACKUPTHREAD','Ocorre quando uma tarefa estiver esperando a conclus„o da tarefa de backup. Os tempos de espera podem ser longos, de alguns minutos atÈ varias horas. Se a tarefa sendo aguardada estiver em um processo de E/S, esse tipo n„o indicara um pro'
+insert dbawaittypes select 'BAD_PAGE_PROCESS','Ocorre quando o registrador de pagina suspeita em segundo plano estiver tentando evitar a execuÁ„o mais que cada cinco segundos. Paginas suspeitas em excesso causam a execuÁ„o freqüente do registrador.'
+insert dbawaittypes select 'BROKER_CONNECTION_RECEIVE_TASK','Ocorre ao aguardar o acesso para receber uma mensagem em um ponto de extremidade de conex„o. O acesso de recepÁ„o para o ponto de extremidade È serializado.'
+insert dbawaittypes select 'BROKER_ENDPOINT_STATE_MUTEX','Ocorre quando houver contenÁ„o para acessar o estado de um ponto de extremidade de conex„o Service Broker. O acesso ao estado das alterações È serializado.'
+insert dbawaittypes select 'BROKER_EVENTh·NDLER','Ocorre quando uma tarefa estiver aguardando o manipulador de eventos principal do Service Broker. Isso deve ocorrer muito brevemente.'
+insert dbawaittypes select 'BROKER_INIT','Ocorre ao inicializar Service Broker em cada banco de dados ativo. Isso deve ocorrer raramente.'
+insert dbawaittypes select 'BROKER_MASTERSTART','Ocorre quando uma tarefa estiver aguardando o manipulador de eventos principal do Service Broker para iniciar. Isso deve ocorrer muito brevemente.'
+insert dbawaittypes select 'BROKER_RECEIVE_WAITFOR','Ocorre quando RECEIVE WAITFOR estiver aguardando. Isso sera comum se nenhuma mensagem estiver pronta para ser recebida.'
+insert dbawaittypes select 'BROKER_REGISTERALLENDPOINTS','Ocorre durante a inicializaÁ„o de um ponto de extremidade de conex„o do Service Broker. Isso deve ocorrer muito brevemente.'
+insert dbawaittypes select 'BROKER_SERVICE','Ocorre quando a lista de destino do Service Broker que esta associada a um serviço de destino È atualizada ou priorizada novamente.'
+insert dbawaittypes select 'BROKER_SHUTDOWN','Ocorre quando h· um desligamento planejado do Service Broker. Isso deve ocorrer muito brevemente, se ocorrer.'
+insert dbawaittypes select 'BROKER_TASK_STOP','Ocorre quando o manipulador de tarefa da fila do Service Broker tenta desligar a tarefa. A verificaÁ„o do estado È serializada e deve estar em um estado de execuÁ„o antecipadamente.'
+insert dbawaittypes select 'BROKER_TO_FLUSH','Ocorre quando o liberador lento do Service Broker libera os objetos de transmiss„o na memÛria para uma tabela de trabalho.'
+insert dbawaittypes select 'BROKER_TRANSMITTER','Ocorre quando o transmissor Service Broker esta aguardando o trabalho.'
+insert dbawaittypes select 'BUILTIN_h·SHKEY_MUTEX','Pode ocorrer depois de inicializaÁ„o de instância, enquanto as estruturas de dados internos estiverem sendo inicializadas. N„o ocorrera antes que as estruturas de dados tiverem inicializado.'
+insert dbawaittypes select 'CHECK_PRINT_RECORD','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'CHECKPOINT_QUEUE','Ocorre enquanto a tarefa de ponto de verificaÁ„o aguarda a prÛxima solicitaÁ„o de ponto de verificaÁ„o.'
+insert dbawaittypes select 'CHKPT','Ocorre na inicializaÁ„o de servidor para informar ao thread de ponto de verificaÁ„o que ele pode iniciar.'
+insert dbawaittypes select 'CLEAR_DB','Ocorre durante operações que alteram o estado de um banco de dados, como abrir ou fech·r um banco de dados.'
+insert dbawaittypes select 'CLR_AUTO_EVENT','Ocorre quando uma tarefa executa o CLR (Common Language Runtime) e aguarda o inÌcio de um determinado evento automatico. Esperas longas s„o comuns e n„o indicam um problema.'
+insert dbawaittypes select 'CLR_CRST','Ocorre quando uma tarefa esta executando o CLR e aguarda a apresentaÁ„o de uma seÁ„o crÌtica da tarefa que esta, atualmente, sendo usada por outra tarefa.'
+insert dbawaittypes select 'CLR_JOIN','Ocorre quando uma tarefa executa o CLR e aguarda o tÈrmino de outra tarefa. Esse estado de espera quando h· uma junÁ„o entre tarefas.'
+insert dbawaittypes select 'CLR_MANUAL_EVENT','Ocorre quando uma tarefa esta executando o CLR atualmente e esta aguardando um evento manual especÌfico a ser iniciado.'
+insert dbawaittypes select 'CLR_MEMORY_SPY','Ocorre durante uma espera na aquisiÁ„o de bloqueio para uma estrutura de dados que È usada para registrar todas as alocações de memÛria virtual provenientes do CLR. A estrutura de dados sera bloqueada para manter sua integridade se houver'
+insert dbawaittypes select 'CLR_MONITOR','Ocorre quando uma tarefa esta executando o CLR atualmente e aguardando para obter um bloqueio no monitor.'
+insert dbawaittypes select 'CLR_RWLOCK_READER','Ocorre quando uma tarefa executa o CLR e aguarda um bloqueio de leitor.'
+insert dbawaittypes select 'CLR_RWLOCK_WRITER','Ocorre quando uma tarefa executa o CLR e aguarda um bloqueio de gravador.'
+insert dbawaittypes select 'CLR_SEMAPHORE','Ocorre quando uma tarefa executa o CLR e aguarda um semaforo.'
+insert dbawaittypes select 'CLR_TASK_START','Ocorre enquanto aguarda a inicializaÁ„o de uma tarefa de CLR ser concluÌda.'
+insert dbawaittypes select 'CLRHOST_STATE_ACCESS','Ocorre quando h· uma espera para adquirir acesso exclusivo às estruturas de dados de hospedagem de CLR. Esse tipo de espera ocorre ao configurar ou subdividir o tempo de execuÁ„o do CLR.'
+insert dbawaittypes select 'CMEMTHREAD','Ocorre quando uma tarefa esta aguardando um objeto de memÛria protegido por thread. O tempo de espera pode aumentar quando h· contenÁ„o provocada por varias tarefas tentando alocar memÛria do mesmo objeto de memÛria.'
+insert dbawaittypes select 'CXPACKET','Ocorre ao tentar sincronizar o iterador de troca do processador de consulta. A reduÁ„o do grau de paralelismo podera ser considerada se a contenÁ„o nesse tipo de espera se tornar um problema.'
+insert dbawaittypes select 'CXROWSET_SYNC','Ocorre durante um exame de intervalo paralelo.'
+insert dbawaittypes select 'DAC_INIT','Ocorre enquanto a conex„o de administrador dedicada estiver inicializando.'
+insert dbawaittypes select 'DBMIRROR_DBM_EVENT','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'DBMIRROR_DBM_MUTEX','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'DBMIRROR_EVENTS_QUEUE','Ocorre quando o espelh·mento de banco de dados aguarda o processamento de eventos.'
+insert dbawaittypes select 'DBMIRROR_SEND','Ocorre quando uma tarefa aguarda que os registros acumulados de comunicações na camada de rede a serem apagados possam enviar mensagens. Indica que a camada de comunicações esta começando a ser sobrecarregada e a afetar a taxa de transferência de dados p espelh·mento de BD.'
+insert dbawaittypes select 'DBMIRROR_WORKER_QUEUE','Indica que a tarefa de trabalh·dor de espelh·mento de banco de dados esta aguardando mais trabalho.'
+insert dbawaittypes select 'DBMIRRORING_CMD','Ocorre quando uma tarefa aguarda a liberaÁ„o dos registros para o disco. Estima-se que esse estado de espera seja mantido por longos perÌodos de tempo.'
+insert dbawaittypes select 'DEADLOCK_ENUM_MUTEX','Ocorre quando o monitor de deadlock e sys.dm_os_waiting_tasks tentam verificar se o SQL Server n„o esta executando varias pesquisas de deadlock ao mesmo tempo.'
+insert dbawaittypes select 'DEADLOCK_TASK_SEARCH','Um grande tempo de espera nesse recurso indica que o servidor esta realizando consultas na parte superior de sys.dm_os_waiting_tasks e que essas consultas est„o impedindo o monitor de deadlock de pesquisar deadlocks. Esse tipo de espera sÛ È usado a de deadlock. Consultas na parte superior de sys.dm_os_waiting_tasks usam DEADLOCK_ENUM_MUTEX.'
+insert dbawaittypes select 'DEBUG','Ocorre durante depuraÁ„o de Transact-SQL e CLR para sincronizaÁ„o interna.'
+insert dbawaittypes select 'DISABLE_VERSIONING','Ocorre quando SQL Server pesquisa a vers„o do gerenciador de transações para verificar se o carimbo de data e hora da vers„o ativa mais recente È posterior ao carimbo de data e hora quando o estado começou a mudar.'
+insert dbawaittypes select 'DISKIO_SUSPEND','Ocorre quando uma tarefa estiver esperando para acessar um arquivo quando um backup externo esta ativo.'
+insert dbawaittypes select 'DISPATCHER_QUEUE_SEMAPHORE','Ocorre quando um thread do pool de dispatcher esta aguardando mais trabalho para processamento. Estima-se que o tempo para esse tipo de espera aumente quando o dispatcher estiver ocioso.'
+insert dbawaittypes select 'DLL_LOADING_MUTEX','Ocorre uma vez ao aguardar a DLL do analisador XML ser carregada.'
+insert dbawaittypes select 'DROPTEMP','Ocorre entre tentativas para descartar um objeto temporario caso a tentativa anterior tenh· falh·do. A duraÁ„o da espera cresce bastante em cada tentativa de descarte com falh·.'
+insert dbawaittypes select 'DTC','Ocorre quando uma tarefa estiver esperando um evento usado para gerenciar a transiÁ„o de estado. Esse estado controla quando a recuperaÁ„o das transações de Microsoft Distributed Transaction Coordinator (MS DTC'
+insert dbawaittypes select 'DTC_ABORT_REQUEST','Ocorre em uma sess„o de trabalh·dor de MS DTC quando a sess„o estiver aguardando para obter a propriedade de uma transaÁ„o de MS DTC.'
+insert dbawaittypes select 'DTC_RESOLVE','Ocorre quando uma tarefa de recuperaÁ„o esta aguardando o banco de dados mestre em uma transaÁ„o de banco de dados cruzado de forma que a tarefa possa consultar o resultado da transaÁ„o.'
+insert dbawaittypes select 'DTC_STATE','Ocorre quando uma tarefa esta esperando um evento que protege as alterações no objeto de estado global de MS DTC. Esse estado deve ser mantido para intervalos de tempo muito curtos.'
+insert dbawaittypes select 'DTC_TMDOWN_REQUEST','Ocorre em uma sess„o de trabalh·dor de MS DTC quando SQL Server recebe notificaÁ„o que o serviço de MS DTC n„o esta disponÌvel. Primeiro, o trabalh·dor aguardara o processo de recuperaÁ„o de da transaÁ„o distribuÌda em que o trabalh·dor esta trabalh·ndo. Isso pode continuar atÈ a conex„o com o serviço de MS DTC ser restabelecida.'
+insert dbawaittypes select 'DTC_WAITFOR_OUTCOME','Ocorre quando as tarefas de recuperaÁ„o aguardam o MS DTC ficar ativo para ativar a resoluÁ„o de transações preparadas.'
+insert dbawaittypes select 'DUMP_LOG_COORDINATOR','Ocorre quando uma tarefa principal esta esperando uma subtarefa gerar dados. Em geral, esse estado n„o ocorre. Uma espera longa indica um bloqueio inesperado. A subtarefa deve ser investigada.'
+insert dbawaittypes select 'DUMPTRIGGER','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'EC','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'EE_PMOLOCK','Ocorre durante a sincronizaÁ„o de certos tipos de alocações de memÛria durante execuÁ„o de instruÁ„o.'
+insert dbawaittypes select 'EE_SPECPROC_MAP_INIT','Ocorre durante sincronizaÁ„o da criaÁ„o de tabela de h·sh de procedimento interno. Essa espera sÛ pode acontecer durante o acesso inicial da tabela de h·sh depois que a instância SQL Server È iniciada.'
+insert dbawaittypes select 'ENABLE_VERSIONING','Ocorre quando SQL Server aguarda a finalizaÁ„o de todas as transações de atualizaÁ„o neste banco de dados, antes de declarar o banco de dados pronto para o estado permitido de isolamento de instantâneo. Esse estado È usado quando SQL Server ativa o isolamento de instantâneo usando a instruÁ„o ALTER DATABASE.'
+insert dbawaittypes select 'ERROR_REPORTING_MANAGER','Ocorre durante a sincronizaÁ„o de varias inicializações de log de erros simultâneas.'
+insert dbawaittypes select 'EXCh·NGE','Ocorre durante a sincronizaÁ„o no iterador de troca de processador de consulta durante consultas paralelas.'
+insert dbawaittypes select 'EXECSYNC','Ocorre durante consultas paralelas durante a sincronizaÁ„o em processador de consulta em areas n„o relacionadas ao iterador de troca. Exemplos dessas areas s„o bitmaps, LOBs'
+insert dbawaittypes select 'EXECUTION_PIPE_EVENT_INTERNAL','Ocorre durante a sincronizaÁ„o entre o produtor e partes do consumidor de execuÁ„o em lotes que s„o enviados por meio do contexto da conex„o.'
+insert dbawaittypes select 'FAILPOINT','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'FCB_REPLICA_READ','Ocorre quando as leituras de um arquivo esparso de instantâneo (ou um instantâneo temporario criado por DBCC) s„o sincronizadas.'
+insert dbawaittypes select 'FCB_REPLICA_WRITE','Ocorre quando o envio ou a remoÁ„o de uma pagina de um arquivo esparso de instantâneo (ou de um instantâneo temporario criado por DBC) È sincronizado.'
+insert dbawaittypes select 'FS_FC_RWLOCK','Ocorre quando h· uma espera pelo coletor de lixo do FILESTREAM para proceder de uma das seguintes maneiras: Desabilitar a coleta de lixo (usada por backup e restauraÁ„). Ou  Executar um ciclo do coletor de lixo do FILESTREAM.'
+insert dbawaittypes select 'FS_GARBAGE_COLLECTOR_SHUTDOWN','Ocorre quando o coletor de lixo do FILESTREAM esta aguardando que tarefas de limpeza sejam concluÌdas.'
+insert dbawaittypes select 'FS_HEADER_RWLOCK','Ocorre quando h· uma espera para adquirir acesso ao cabeçalho do FILESTREAM de um contêiner de dados do FILESTREAM para ler ou atualizar o conteúdo no arquivo de cabeçalho do FILESTREAM (Filestream.hdr.'
+insert dbawaittypes select 'FS_LOGTRUNC_RWLOCK','Ocorre quando h· uma espera para adquirir acesso ao truncamento de log do FILESTREAM para proceder de uma das seguintes maneiras:'
+insert dbawaittypes select 'FSA_FORCE_OWN_XACT','Ocorre quando uma operaÁ„o de E/S de arquivo do FILESTREAM precisa associar-se à transaÁ„o associada, mas a transaÁ„o pertence a outra sess„o no momento.'
+insert dbawaittypes select 'FSAGENT','Ocorre quando uma operaÁ„o de E/S de arquivo FILESTREAM esta aguardando um recurso do agente do FILESTREAM que esta sendo usado por outra operaÁ„o de E/S de arquivo.'
+insert dbawaittypes select 'FSTR_CONFIG_MUTEX','Ocorre quando h· uma espera para que outra reconfiguraÁ„o de recurso do FILESTREAM seja concluÌda.'
+insert dbawaittypes select 'FSTR_CONFIG_RWLOCK','Ocorre quando h· uma espera para serializar o acesso aos parâmetros de configuraÁ„o do FILESTREAM.'
+insert dbawaittypes select 'FT_METADATA_MUTEX','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'FT_RESTART_CRAWL','Ocorre quando um rastreamento de texto completo precisa ser reiniciado a partir do último ponto conhecido bom para recuperaÁ„o de uma falh· momentânea. A espera deixa as tarefas do trabalh·dor em execuÁ„o na po'
+insert dbawaittypes select 'FULLTEXT GATHERER','Ocorre durante a sincronizaÁ„o de operações de texto completo.'
+insert dbawaittypes select 'GUARDIAN','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'HTTP_ENUMERATION','Ocorre na inicializaÁ„o para enumerar os pontos de extremidade de HTTP para iniciar o HTTP.'
+insert dbawaittypes select 'HTTP_START','Ocorre quando uma conex„o esta esperando que o HTTP conclua a inicializaÁ„o.'
+insert dbawaittypes select 'IMPPROV_IOWAIT','Ocorre quando o SQL Server aguarda que uma E/S de carregamento em massa seja concluÌda.'
+insert dbawaittypes select 'INTERNAL_TESTING','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'IO_AUDIT_MUTEX','Ocorre durante a sincronizaÁ„o de buffers de evento de rastreamento.'
+insert dbawaittypes select 'IO_COMPLETION','Ocorre enquanto se espera as operações de E/S serem concluÌdas. Esse tipo de espera geralmente representa E/Ss de pagina sem dados. As esperas de conclus„o de E/S da pagina de dados s„o exibidas como esperas PAGEIOLATCH_'
+insert dbawaittypes select 'IO_RETRY','Ocorre quando uma operaÁ„o de E/S, como uma leitura ou uma gravaÁ„o no disco, falh· devido a recursos insuficientes, e È tentada novamente.'
+insert dbawaittypes select 'IOAFF_RANGE_QUEUE','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'KSOURCE_WAKEUP','Usado pela tarefa de controle de serviço ao aguardar solicitações do Gerenciador de Controle de Serviços. Esperas longas est„o previstas e n„o indicam um problema.'
+insert dbawaittypes select 'KTM_ENLISTMENT','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'KTM_RECOVERY_MANAGER','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'KTM_RECOVERY_RESOLUTION','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'LATCH_DT','Ocorre ao esperar uma trava de DT (destruir). Isso n„o inclui travas de buffer ou de marcaÁ„o de transaÁ„o. Uma listagem deesperas de LATCH_* esta disponÌvel em sys.dm_os_latch_stats. Observe que sys.dm_os_latch_stats agrupa'
+insert dbawaittypes select 'LATCH_EX','Ocorre ao esperar uma trava de EX (exclusivo). Isso n„o inclui travas de buffer ou de marcaÁ„o de transaÁ„o. Uma listagem de esperas de LATCH_* esta disponÌvel em sys.dm_os_latch_stats. Observe que sys.dm_os_latch_stat'
+insert dbawaittypes select 'LATCH_KP','Ocorre ao esperar uma trava de KP (manutenÁ„). Isso n„o inclui travas de buffer ou de marcaÁ„o de transaÁ„o. Uma listagem de esperas de LATCH_* esta disponÌvel em sys.dm_os_latch_stats. Observe que sys.dm_os_latch_stats a'
+insert dbawaittypes select 'LATCH_NL','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'LATCH_SH','Ocorre ao esperar uma trava de SH (compartilh·mento). Isso n„o inclui travas de buffer ou de marcaÁ„o de transaÁ„o. Uma listagem de esperas de LATCH_* esta disponÌvel em sys.dm_os_latch_stats. Observe que sys.dm_os_latch_stats a'
+insert dbawaittypes select 'LATCH_UP','Ocorre ao esperar uma trava de UP (atualizaÁ„o). Isso n„o inclui travas de buffer ou de marcaÁ„o de transaÁ„o. Uma listagem de esperas de LATCH_* esta disponÌvel em sys.dm_os_latch_stats. Observe que sys.dm_os_latch_stats agrupa'
+insert dbawaittypes select 'LAZYWRITER_SLEEP','Ocorre quando as tarefas lazywriter s„o suspensas. É uma mediÁ„o do tempo gasto por tarefas em segundo plano em espera. N„o considere esse estado quando você estiver procurando pausas de usuario.'
+insert dbawaittypes select 'LCK_M_BU','Ocorre quando uma tarefa esta esperando para adquirir um bloqueio AtualizaÁ„o em Massa (B). Para obter uma matriz de compatibilidade de bloqueio, consulte sys.dm_tran_locks (Transact-SQL).'
+insert dbawaittypes select 'LCK_M_IS','Ocorre quando uma tarefa esta esperando para adquirir um bloqueio Tentativa Compartilh·da (IS). Para obter uma matriz de compatibilidade de bloqueio, consulte sys.dm_tran_locks (Transact-SQL).'
+insert dbawaittypes select 'LCK_M_IU','Ocorre quando uma tarefa esta esperando para adquirir um bloqueio AtualizaÁ„o da Tentativa (IU). Para obter uma matriz de compatibilidade de bloqueio, consulte sys.dm_tran_locks (Transact-SQL).'
+insert dbawaittypes select 'LCK_M_IX','Ocorre quando uma tarefa esta esperando para adquirir um bloqueio Exclusivo da Tentativa (IX). Para obter uma matriz de compatibilidade de bloqueio, consulte sys.dm_tran_locks (Transact-SQL).'
+insert dbawaittypes select 'LCK_M_RIn_NL','Ocorre quando uma tarefa esta esperando adquirir um bloqueio NULL no valor de ch·ve atual e um bloqueio InserÁ„o de Intervalo entre a ch·ve atual e a anterior. Um bloqueio NULL na ch·ve È um bloqueio de liberaÁ„o instantâneo.'
+insert dbawaittypes select 'LCK_M_RIn_S','Ocorre quando uma tarefa esta esperando adquirir um bloqueio compartilh·do no valor de ch·ve atual e um bloqueio InserÁ„o de Intervalo entre a ch·ve atual e a anterior. Para obter uma matriz de compatibilidade de bloquei'
+insert dbawaittypes select 'LCK_M_RIn_U','Uma tarefa que esta esperando para adquirir um bloqueio AtualizaÁ„o no valor de ch·ve atual e um bloqueio InserÁ„o de Intervalo entre a ch·ve atual e a anterior. Para obter uma matriz de compatibilidade de bloqueio, consu'
+insert dbawaittypes select 'LCK_M_RIn_X','Ocorre quando uma tarefa esta esperando adquirir um bloqueio Exclusivo no valor de ch·ve atual e um bloqueio InserÁ„o de Intervalo entre a ch·ve atual e a anterior. Para obter uma matriz de compatibilidade de bloqueio, co'
+insert dbawaittypes select 'LCK_M_RS_S','Ocorre quando uma tarefa esta esperando adquirir um bloqueio Compartilh·do no valor de ch·ve atual e um bloqueio Intervalo Compartilh·do entre a ch·ve atual e a anterior. Para obter uma matriz de compatibilidade de bloq'
+insert dbawaittypes select 'LCK_M_RS_U','Ocorre quando uma tarefa esta esperando adquirir um bloqueio AtualizaÁ„o no valor de ch·ve atual e um bloqueio AtualizaÁ„o de Intervalo entre a ch·ve atual e a anterior. Para obter uma matriz de compatibilidade de bloquei'
+insert dbawaittypes select 'LCK_M_RX_S','Ocorre quando uma tarefa esta esperando adquirir um bloqueio Compartilh·do no valor de ch·ve atual e um bloqueio Intervalo Exclusivo entre a ch·ve atual e a anterior. Para obter uma matriz de compatibilidade de bloqueio,'
+insert dbawaittypes select 'LCK_M_RX_U','Ocorre quando uma tarefa esta esperando adquirir um bloqueio AtualizaÁ„o no valor de ch·ve atual e um bloqueio Intervalo Exclusivo entre a ch·ve atual e a anterior. Para obter uma matriz de compatibilidade de bloqueio, co'
+insert dbawaittypes select 'LCK_M_RX_X','Ocorre quando uma tarefa esta esperando adquirir um bloqueio Exclusivo no valor de ch·ve atual e um bloqueio Intervalo Exclusivo entre a ch·ve atual e a anterior. Para obter uma matriz de compatibilidade de bloqueio, cons'
+insert dbawaittypes select 'LCK_M_S','Ocorre quando uma tarefa esta esperando para adquirir um bloqueio Compartilh·do. Para obter uma matriz de compatibilidade de bloqueio, consulte sys.dm_tran_locks (Transact-SQ).'
+insert dbawaittypes select 'LCK_M_SCH_M','Ocorre quando uma tarefa esta esperando para adquirir um bloqueio ModificaÁ„o de Esquema. Para obter uma matriz de compatibilidade de bloqueio, consulte sys.dm_tran_locks (Transact-SQL).'
+insert dbawaittypes select 'LCK_M_SCH_S','Ocorre quando uma tarefa esta esperando para adquirir um bloqueio Compartilh·mento de Esquema. Para obter uma matriz de compatibilidade de bloqueio, consulte sys.dm_tran_locks (Transact-SQ).'
+insert dbawaittypes select 'LCK_M_SIU','Ocorre quando uma tarefa esta esperando para adquirir um bloqueio Compartilh·do com AtualizaÁ„o da Tentativa. Para obter uma matriz de compatibilidade de bloqueio, consulte sys.dm_tran_locks (Transact-SQL).'
+insert dbawaittypes select 'LCK_M_SIX','Ocorre quando uma tarefa esta esperando para adquirir um bloqueio Compartilh·do com Exclusivo da Tentativa. Para obter uma matriz de compatibilidade de bloqueio, consulte sys.dm_tran_locks (Transact-SQ).'
+insert dbawaittypes select 'LCK_M_U','Ocorre quando uma tarefa esta esperando para adquirir um bloqueio AtualizaÁ„o. Para obter uma matriz de compatibilidade de bloqueio, consulte sys.dm_tran_locks (Transact-SQL).'
+insert dbawaittypes select 'LCK_M_UIX','Ocorre quando uma tarefa esta esperando para adquirir um bloqueio AtualizaÁ„o com Exclusivo da Tentativa. Para obter uma matriz de compatibilidade de bloqueio, consulte sys.dm_tran_locks (Transact-SQL).'
+insert dbawaittypes select 'LCK_M_X','Ocorre quando uma tarefa esta esperando para adquirir um bloqueio Exclusivo. Para obter uma matriz de compatibilidade de bloqueio, consulte sys.dm_tran_locks (Transact-SQL).'
+insert dbawaittypes select 'LOGBUFFER','Ocorre quando uma tarefa esta esperando espaço no buffer de log para armazenar um registro de log. Consistentemente, valores altos podem indicar que os dispositivos de log n„o podem acompanh·r a quantidade de log que'
+insert dbawaittypes select 'LOGGENERATION','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'LOGMGR','Ocorre quando uma tarefa esta aguardando que qualquer E/S de log pendente seja concluÌda antes de desativar o log durante o fech·mento do banco de dados.'
+insert dbawaittypes select 'LOGMGR_FLUSH','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'LOGMGR_QUEUE','Ocorre enquanto a tarefa de gravador de log aguarda solicitações de trabalho.'
+insert dbawaittypes select 'LOGMGR_RESERVE_APPEND','Ocorre quando uma tarefa esta esperando para verificar se o truncamento de log libera espaço para logs, para que a tarefa possa gravar um novo registro de log. Considere aumentar o tamanho do(s) arquivo(s) de log para o banco de d'
+insert dbawaittypes select 'LOWFAIL_MEMMGR_QUEUE','Ocorre ao aguardar que a memÛria esteja disponÌvel para uso.'
+insert dbawaittypes select 'MISCELLANEOUS','dentificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'MSQL_DQ','Ocorre quando uma tarefa esta aguardando que uma operaÁ„o de consulta distribuÌda seja concluÌda. Isso È usado para detectar deadlocks de aplicativo MARS (Varios Conjuntos de Resultados Ativo) potenciais.'
+insert dbawaittypes select 'MSQL_XACT_MGR_MUTEX','Ocorre quando uma tarefa esta aguardando para obter a propriedade do gerenciador de transações de sess„o para executar uma operaÁ„o de transaÁ„o em nÌvel de sess„o.'
+insert dbawaittypes select 'MSQL_XACT_MUTEX','Ocorre durante sincronizaÁ„o de uso de transaÁ„o. Uma solicitaÁ„o deve adquirir o mutex antes de usar a transaÁ„o'
+insert dbawaittypes select 'MSQL_XP','Ocorre quando uma tarefa esta esperando a conclus„o de um procedimento armazenado estendido. SQL Server usa esse estado de espera para detectar deadlocks de aplicativo MARS potencial.'
+insert dbawaittypes select 'MSSEARCH','Ocorre durante ch·madas de pesquisa de texto completo. Essa espera termina quando a operaÁ„o de texto completo È concluÌda. Ela n„o indica contenÁ„o, mas a duraÁ„o de operações de texto completo.'
+insert dbawaittypes select 'NET_WAITFOR_PACKET','Ocorre quando uma conex„o esta esperando um pacote de rede durante uma leitura de rede.'
+insert dbawaittypes select 'OLEDB','Ocorre quando SQL Server ch·ma o provedor SQL Server Native Cliente OLE DB. Esse tipo de espera n„o È usado para sincronizaÁ„o. Em vez disso, ele indica a duraÁ„o de ch·madas ao provedor OLE DB.'
+insert dbawaittypes select 'ONDEMAND_TASK_QUEUE','Ocorre enquanto uma tarefa em segundo plano aguarda solicitações de tarefa de sistema de alta prioridade. Os tempos de espera longos indicam que n„o houve nenhuma solicitaÁ„o de alta prioridade a ser processa'
+insert dbawaittypes select 'PAGEIOLATCH_DT','Ocorre quando uma tarefa esta esperando em uma trava por um buffer que esta em uma solicitaÁ„o de E/S. A solicitaÁ„o de trava esta no modo DestruiÁ„o. Esperas longas podem indicar problemas no subsistema d'
+insert dbawaittypes select 'PAGEIOLATCH_EX','Ocorre quando uma tarefa esta esperando em uma trava por um buffer que esta em uma solicitaÁ„o de E/S. A solicitaÁ„o de trava esta em modo Exclusivo. Esperas longas podem indicar problemas no subsistema de'
+insert dbawaittypes select 'PAGEIOLATCH_KP','Ocorre quando uma tarefa esta esperando em uma trava por um buffer que esta em uma solicitaÁ„o de E/S. A solicitaÁ„o de trava esta no modo ManutenÁ„o. Esperas longas podem indicar problemas no subsistema'
+insert dbawaittypes select 'PAGEIOLATCH_NL','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'PAGEIOLATCH_SH','Ocorre quando uma tarefa esta esperando em uma trava por um buffer que esta em uma solicitaÁ„o de E/S. A solicitaÁ„o de trava esta no modo Compartilh·do. Esperas longas podem indicar problemas no subsistem'
+insert dbawaittypes select 'PAGEIOLATCH_UP','Ocorre quando uma tarefa esta esperando em uma trava por um buffer que esta em uma solicitaÁ„o de E/S. A solicitaÁ„o de trava esta no modo AtualizaÁ„o. Esperas longas podem indicar problemas no subsistema'
+insert dbawaittypes select 'PAGELATCH_DT','Ocorre quando uma tarefa esta esperando em uma trava por um buffer que n„o esta em uma solicitaÁ„o de E/S. A solicitaÁ„o de trava esta no modo DestruiÁ„o.'
+insert dbawaittypes select 'PAGELATCH_EX','Ocorre quando uma tarefa esta esperando em uma trava por um buffer que n„o esta em uma solicitaÁ„o de E/S. A solicitaÁ„o de trava esta em modo Exclusivo.'
+insert dbawaittypes select 'PAGELATCH_KP','Ocorre quando uma tarefa esta esperando em uma trava por um buffer que n„o esta em uma solicitaÁ„o de E/S. A solicitaÁ„o de trava esta no modo ManutenÁ„o.'
+insert dbawaittypes select 'PAGELATCH_NL','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'PAGELATCH_SH','Ocorre quando uma tarefa esta esperando em uma trava por um buffer que n„o esta em uma solicitaÁ„o de E/S. A solicitaÁ„o de trava esta no modo Compartilh·do.'
+insert dbawaittypes select 'PAGELATCH_UP','Ocorre quando uma tarefa esta esperando em uma trava por um buffer que n„o esta em uma solicitaÁ„o de E/S. A solicitaÁ„o de trava esta no modo AtualizaÁ„o.'
+insert dbawaittypes select 'PARALLEL_BACKUP_QUEUE','Ocorre ao serializar a saÌda produzida por RESTORE HEADERONLY, RESTORE FILELISTONLY ou RESTORE LABELONLY.'
+insert dbawaittypes select 'PREEMPTIVE_ABR','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'PREEMPTIVE_AUDIT_ACCESS_EVENTLOG','Ocorre quando o agendador de Sistema operacional (SQLOS) SQL Server alterna para o modo preemptivo para escrever um evento de auditoria para o log de eventos do Windows.'
+insert dbawaittypes select 'PREEMPTIVE_AUDIT_ACCESS_SECLOG','Ocorre quando o agendador de Sistema operacional (SQLOS) alterna para o modo preemptivo para escrever um evento de auditoria para o log de segurança do Windows.'
+insert dbawaittypes select 'PREEMPTIVE_CLOSEBACKUPMEDIA','Ocorre quando o agendador de SQLOS alterna para o modo preventivo para fech·r a mÌdia de backup.'
+insert dbawaittypes select 'PREEMPTIVE_CLOSEBACKUPTAPE','Ocorre quando o agendador de SQLOS alterna para o modo preemptivo para fech·r um dispositivo de backup de fita.'
+insert dbawaittypes select 'PREEMPTIVE_CLOSEBACKUPVDIDEVICE','Ocorre quando o agendador de SQLOS alterna para o modo preemptivo para fech·r um dispositivo de backup virtual.'
+insert dbawaittypes select 'PREEMPTIVE_CLUSAPI_CLUSTERRESOURCECONTL','Ocorre quando o agendador de Sistema operacional (SQLOS) alterna para o modo preemptivo para executar operações de cluster de failover do Windows.'
+insert dbawaittypes select 'PREEMPTIVE_COM_COCREATEINSTANCE','Ocorre quando o agendador de SQLOS alterna para o modo preemptivo para criar um objeto COM.'
+insert dbawaittypes select 'PREEMPTIVE_SOSTESTING','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'PREEMPTIVE_STRESSDRIVER','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'PREEMPTIVE_TESTING','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'PREEMPTIVE_XETESTING','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'PRINT_ROLLBACK_PROGRESS','Usado para aguardar enquanto os processos do usuario s„o finalizados em um banco de dados que passou por transiÁ„o usando a clausula de tÈrmino ALTER DATABASE.'
+insert dbawaittypes select 'QPJOB_KILL','Indica que uma atualizaÁ„o de estatÌstica automatica e assÌncrona foi cancelada por uma ch·mada para KILL enquanto a atualizaÁ„o estava começando a ser executada. O thread de tÈrmino esta suspenso, esperando que ele inicie a escuta'
+insert dbawaittypes select 'QPJOB_WAITFOR_ABORT','Indica que uma atualizaÁ„o assÌncrona de estatÌsticas automatica foi cancelada por uma ch·mada a KILL quando estava sendo executada. A atualizaÁ„o agora esta concluÌda, mas esta suspensa atÈ que a coordenaÁ„o de m'
+insert dbawaittypes select 'QRY_MEM_GRANT_INFO_MUTEX','Ocorre quando o gerenciamento de memÛria de execuÁ„o de consulta tenta controlar o acesso à lista de informações de concess„o estaticas.'
+insert dbawaittypes select 'QUERY_ERRHDL_SERVICE_DONE','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'QUERY_EXECUTION_INDEX_SORT_EVENT_OPEN','Ocorre em determinados casos quando a criaÁ„o de Ìndice offline È executada em paralelo, e os diferentes threads de trabalho que est„o classificando sincronizam o acesso aos arquivos de classificaÁ„o.'
+insert dbawaittypes select 'QUERY_NOTIFICATION_MGR_MUTEX','Ocorre durante a sincronizaÁ„o da fila de coleta de lixo do gerenciador de notificaÁ„o de consulta.'
+insert dbawaittypes select 'QUERY_NOTIFICATION_SUBSCRIPTION_MUTEX','Ocorre durante a sincronizaÁ„o de estado para transações em notificações de consulta.'
+insert dbawaittypes select 'QUERY_NOTIFICATION_TABLE_MGR_MUTEX','Ocorre durante sincronizaÁ„o interna no gerenciador de notificaÁ„o de consulta.'
+insert dbawaittypes select 'QUERY_NOTIFICATION_UNITTEST_MUTEX','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'QUERY_OPTIMIZER_PRINT_MUTEX','Ocorre durante sincronizaÁ„o de produÁ„o de saÌda de diagnÛstico do otimizador de consulta. Esse tipo de espera sÛ ocorrera se as configurações de diagnÛstico estiverem h·bilitadas sob a direÁ„o do Suporte ao Produto da Microsoft.'
+insert dbawaittypes select 'QUERY_TRACEOUT','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'QUERY_WAIT_ERRHDL_SERVICE','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'RECOVER_Ch·NGEDB','Ocorre durante a sincronizaÁ„o do status do banco de dados em espera passiva.'
+insert dbawaittypes select 'REPL_CACHE_ACCESS','Ocorre durante a sincronizaÁ„o em um cache de artigo de replicaÁ„o. Durante essas esperas, o leitor de log de replicaÁ„o entra em pausa e as instruções DDL (linguagem de definiÁ„o de dados) em uma tabela publicada, s„o bloqueadas.'
+insert dbawaittypes select 'REPL_SCHEMA_ACCESS','Ocorre durante sincronizaÁ„o das informações de vers„o do esquema de replicaÁ„o. Esse estado ocorre quando as instruções DDL s„o executadas no objeto replicado e quando o leitor de log gera ou consome esquema com controle de vers„o com base num DDL.'
+insert dbawaittypes select 'REPLICA_WRITES','Ocorre enquanto uma tarefa espera a conclus„o de gravações de pagina em instantâneos de banco de dados ou rÈplicas de DBCC.'
+insert dbawaittypes select 'REQUEST_DISPENSER_PAUSE','Ocorre quando uma tarefa esta esperando a conclus„o de todas as E/Ss pendentes, de forma que a E/S para um arquivo possa ser congelada para backup de instantâneo.'
+insert dbawaittypes select 'REQUEST_FOR_DEADLOCK_SEARCH','Ocorre enquanto o monitor de deadlock espera iniciar a prÛxima pesquisa de deadlock. Essa espera È prevista entre as detecções de deadlock e, o tempo total maior nesse recurso, n„o significa que existe um problema.'
+insert dbawaittypes select 'RESMGR_THROTTLED','Ocorre quando uma nova solicitaÁ„o chega e È suprimida com base na configuraÁ„o de GROUP_MAX_REQUESTS.'
+insert dbawaittypes select 'RESOURCE_QUEUE','Ocorre durante a sincronizaÁ„o de varias filas de recurso internos.'
+insert dbawaittypes select 'RESOURCE_SEMAPHORE','Ocorre quando uma solicitaÁ„o de memÛria de consulta n„o pode ser concedida imediatamente devido a outras consultas simultâneas.'
+insert dbawaittypes select 'RESOURCE_SEMAPHORE_MUTEX','Ocorre enquanto uma consulta aguarda a sua solicitaÁ„o de uma reserva de thread ser atendida. TambÈm ocorre durante a sincronizaÁ„o de solicitações de compilaÁ„o de consulta e concess„o de memÛr'
+insert dbawaittypes select 'RESOURCE_SEMAPHORE_QUERY_COMPILE','Ocorre quando o número de compilações de consulta simultâneas atinge um limite de estrangulamento. Esperas e tempos de espera longos podem indicar compilações excessivas, recompilações ou plano'
+insert dbawaittypes select 'RESOURCE_SEMAPHORE_SMALL_QUERY','Ocorre quando uma solicitaÁ„o de memÛria por meio de uma pequena consulta n„o pode ser concedida imediatamente devido a outras consultas simultâneas.'
+insert dbawaittypes select 'SEC_DROP_TEMP_KEY','Ocorre depois de uma falh· ao tentar descartar uma ch·ve de segurança temporaria antes de uma nova tentativa.'
+insert dbawaittypes select 'SECURITY_MUTEX','Ocorre quando h· uma espera por mutexes que controlam o acesso à lista global de provedores criptograficos de EKM (Gerenciamento ExtensÌvel de Ch·ves) e à lista de escopo de sessões de EKM.'
+insert dbawaittypes select 'SEQUENTIAL_GUID','Ocorre enquanto um novo GUID seqüencial esta sendo obtido.'
+insert dbawaittypes select 'SERVER_IDLE_CHECK','Ocorre durante a sincronizaÁ„o do status ocioso da instância do SQL Server quando um monitor de recursos esta tentando declarar uma instância do SQL Server como ociosa ou tentando ativa-la.'
+insert dbawaittypes select 'SHUTDOWN','Ocorre enquanto uma instruÁ„o de desligamento aguarda o encerramento de conexões ativas.'
+insert dbawaittypes select 'SLEEP_BPOOL_FLUSH','Ocorre quando um ponto de verificaÁ„o esta estrangulando a emiss„o de E/Ss novas para evitar o enchimento do subsistema de disco.'
+insert dbawaittypes select 'SLEEP_DBSTARTUP','Ocorre durante a inicializaÁ„o do banco de dados enquanto aguarda a recuperaÁ„o de todos os bancos de dados.'
+insert dbawaittypes select 'SLEEP_DCOMSTARTUP','Ocorre uma vez no maximo durante inicializaÁ„o de instância SQL Server enquanto aguarda a conclus„o da inicializaÁ„o de DCOM.'
+insert dbawaittypes select 'SLEEP_MSDBSTARTUP','Ocorre quando o SQL Trace aguarda o banco de dados msdb concluir a inicializaÁ„o.'
+insert dbawaittypes select 'SLEEP_SYSTEMTASK','Ocorre durante o inÌcio de uma tarefa em segundo plano enquanto aguarda tempdb concluir a inicializaÁ„o.'
+insert dbawaittypes select 'SLEEP_TASK','Ocorre quando uma tarefa suspensa espera a ocorrência de um evento genÈrico.'
+insert dbawaittypes select 'SLEEP_TEMPDBSTARTUP','Ocorre enquanto uma tarefa espera tempdb completar a inicializaÁ„o.'
+insert dbawaittypes select 'SNI_CRITICAL_SECTION','Ocorre durante a sincronizaÁ„o interna nos componentes de rede do SQL Server.'
+insert dbawaittypes select 'SNI_HTTP_WAITFOR_0_DISCON','Ocorre durante o desligamento do SQL Server ao aguardar o encerramento de conexões HTTP pendentes.'
+insert dbawaittypes select 'SNI_LISTENER_ACCESS','Ocorre ao aguardar que os nÛs NUMA (acesso n„o uniforme à memÛria) atualizem a alteraÁ„o do estado. O acesso à alteraÁ„o de estado È serializado.'
+insert dbawaittypes select 'SNI_TASK_COMPLETION','Ocorre quando h· uma espera para que todas as tarefas sejam concluÌdas durante uma alteraÁ„o de estado de nÛ NUMA.'
+insert dbawaittypes select 'SOAP_READ','Ocorre ao aguardar pela conclus„o de uma leitura de rede HTTP.'
+insert dbawaittypes select 'SOAP_WRITE','Ocorre enquanto aguarda a conclus„o de uma gravaÁ„o de rede HTTP.'
+insert dbawaittypes select 'SOS_CALLBACK_REMOVAL','Ocorre enquanto executa a sincronizaÁ„o em uma lista de retorno de ch·mada para remover um retorno de ch·mada. N„o se espera que esse contador seja alterado depois que a inicializaÁ„o do servidor È'
+insert dbawaittypes select 'SOS_DISPATCHER_MUTEX','Ocorre durante a sincronizaÁ„o interna do pool de dispatchers. Isto inclui o perÌodo de ajuste do pool.'
+insert dbawaittypes select 'SOS_LOCALALLOCATORLIST','Ocorre durante a sincronizaÁ„o interna no gerenciador de memÛria do SQL Server.'
+insert dbawaittypes select 'SOS_MEMORY_USAGE_ADJUSTMENT','Ocorre quando o uso de memÛria esta sendo ajustado entre pools.'
+insert dbawaittypes select 'SOS_OBJECT_STORE_DESTROY_MUTEX','Ocorre durante sincronizaÁ„o interna em pools de memÛria na destruiÁ„o de objetos do pool.'
+insert dbawaittypes select 'SOS_PROCESS_AFFINITY_MUTEX','Ocorre durante a sincronizaÁ„o de acesso para processar configurações de afinidade.'
+insert dbawaittypes select 'SOS_RESERVEDMEMBLOCKLIST','Ocorre durante a sincronizaÁ„o interna no gerenciador de memÛria do SQL Server.'
+insert dbawaittypes select 'SOS_SCHEDULER_YIELD','Ocorre quando uma tarefa cede o agendador para a execuÁ„o de outras tarefas. Durante essa espera, a tarefa espera que seu quantum seja renovado.'
+insert dbawaittypes select 'SOS_SMALL_PAGE_ALLOC','Ocorre durante a alocaÁ„o e a liberaÁ„o de memÛria que È gerenciada por alguns objetos de memÛria.'
+insert dbawaittypes select 'SOS_STACKSTORE_INIT_MUTEX','Ocorre durante a sincronizaÁ„o da inicializaÁ„o do armazenamento interno.'
+insert dbawaittypes select 'SOS_SYNC_TASK_ENQUEUE_EVENT','Ocorre quando uma tarefa È iniciada em uma maneira sÌncrona. A maioria das tarefas em SQL Server s„o iniciadas de maneira assÌncrona, em que o controle retorna ao iniciador logo apÛs a solicitaÁ„o de t'
+insert dbawaittypes select 'SOS_VIRTUALMEMORY_LOW','Ocorre quando uma alocaÁ„o de memÛria espera um gerenciador de recursos liberar memÛria virtual.'
+insert dbawaittypes select 'SOSHOST_EVENT','Ocorre quando um componente hospedado, como CLR, espera um objeto de sincronizaÁ„o de evento do SQL Server.'
+insert dbawaittypes select 'SOSHOST_INTERNAL','Ocorre durante a sincronizaÁ„o de retornos de ch·mada de gerenciador de memÛria usada por componentes hospedados, como CLR.'
+insert dbawaittypes select 'SOSHOST_MUTEX','Ocorre quando um componente hospedado, como CLR, espera um objeto de sincronizaÁ„o de mutex do SQL Server.'
+insert dbawaittypes select 'SOSHOST_RWLOCK','Ocorre quando um componente hospedado, como CLR, espera um objeto de sincronizaÁ„o de leitor-gravador de evento do SQL Server.'
+insert dbawaittypes select 'SOSHOST_SEMAPHORE','Ocorre quando um componente hospedado, como CLR, espera um objeto de sincronizaÁ„o de semaforo SQL Server.'
+insert dbawaittypes select 'SOSHOST_SLEEP','Ocorre quando uma tarefa hospedada entra em suspens„o enquanto espera a ocorrência de um evento genÈrico. As tarefas hospedadas s„o usadas por componentes hospedados, como CLR.'
+insert dbawaittypes select 'SOSHOST_TRACELOCK','Ocorre durante a sincronizaÁ„o de acesso para localizar fluxos.'
+insert dbawaittypes select 'SOSHOST_WAITFORDONE','Ocorre quando um componente hospedado, como CLR, aguarda a conclus„o de uma tarefa.'
+insert dbawaittypes select 'SQLCLR_APPDOMAIN','Ocorre enquanto CLR espera que um domÌnio de aplicativo conclua a inicializaÁ„o.'
+insert dbawaittypes select 'SQLCLR_ASSEMBLY','Ocorre enquanto aguarda o acesso à lista de assemblies carregados em appdomain.'
+insert dbawaittypes select 'SQLCLR_DEADLOCK_DETECTION','Ocorre enquanto CLR aguarda a conclus„o da detecÁ„o de deadlock.'
+insert dbawaittypes select 'SQLCLR_QUANTUM_PUNISHMENT','Ocorre quando uma tarefa CLR È estrangulada porque excedeu seu quantum de execuÁ„o. Esse estrangulamento È feito para reduzir o efeito dessa tarefa com muitos recursos em outras tarefas.'
+insert dbawaittypes select 'SQLSORT_NORMMUTEX','Ocorre durante sincronizaÁ„o interna na inicializaÁ„o das estruturas de classificaÁ„o internas.'
+insert dbawaittypes select 'SQLSORT_SORTMUTEX','Ocorre durante sincronizaÁ„o interna na inicializaÁ„o das estruturas de classificaÁ„o internas.'
+insert dbawaittypes select 'SQLTRACE_BUFFER_FLUSH','Ocorre quando uma tarefa espera que, uma tarefa em segundo plano, libere buffers de rastreamento para o disco a cada quatro segundos.'
+insert dbawaittypes select 'SQLTRACE_LOCK','Ocorre durante sincronizaÁ„o em buffers de rastreamento durante um rastreamento de arquivo.'
+insert dbawaittypes select 'SQLTRACE_SHUTDOWN','Ocorre enquanto o desligamento de rastreamento aguarda a conclus„o dos eventos de rastreamento pendentes.'
+insert dbawaittypes select 'SQLTRACE_WAIT_ENTRIES','Ocorre enquanto uma fila de eventos SQL Trace aguarda a chegada de pacotes na fila.'
+insert dbawaittypes select 'SRVPROC_SHUTDOWN','Ocorre enquanto o processo de desligamento aguarda a liberaÁ„o dos recursos internos para desligamento completo.'
+insert dbawaittypes select 'TEMPOBJ','Ocorre quando os descartes de objetos temporarios s„o sincronizados. Essa espera È rara e sÛ acontecera se uma tarefa solicitar acesso exclusivo para descartes de tabelas temporarias.'
+insert dbawaittypes select 'THREADPOOL','Ocorre quando uma tarefa estiver esperando que um trabalh·dor seja processado no sistema. Isso pode indicar que a configuraÁ„o maxima do trabalh·dor esta muito baixa ou que as execuções em lotes'
+insert dbawaittypes select 'TIMEPRIV_TIMEPERIOD','Ocorre durante a sincronizaÁ„o interna do timer de Eventos Estendidos.'
+insert dbawaittypes select 'TRACEWRITE','Ocorre quando o provedor de rastreamento do conjunto de linh·s de Rastreamento SQL aguarda que um buffer livre ou um buffer com e'
+insert dbawaittypes select 'TRAN_MARKLATCH_DT','Ocorre ao esperar uma trava de modo de destruiÁ„o em uma destruiÁ„o de marcaÁ„o de transaÁ„o. Essas travas s„o usadas para sincro'
+insert dbawaittypes select 'TRAN_MARKLATCH_EX','Ocorre ao esperar uma trava de modo exclusiva em uma transaÁ„o marcada. Essas travas s„o usadas para sincronizaÁ„o de confirmaçõ'
+insert dbawaittypes select 'TRAN_MARKLATCH_KP','Ocorre ao esperar uma trava de modo de manutenÁ„o em uma transaÁ„o marcada. Essas travas s„o usadas para sincronizaÁ„o de confi'
+insert dbawaittypes select 'TRAN_MARKLATCH_NL','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'TRAN_MARKLATCH_SH','Ocorre ao esperar uma trava de modo compartilh·do em uma transaÁ„o marcada. Essas travas s„o usadas para sincronizaÁ„o de confir'
+insert dbawaittypes select 'TRAN_MARKLATCH_UP','Ocorre ao esperar uma trava de modo de atualizaÁ„o em uma transaÁ„o marcada. Essas travas s„o usadas para sincronizaÁ„o de confir'
+insert dbawaittypes select 'TRANSACTION_MUTEX','Ocorre durante a sincronizaÁ„o de acesso a uma transaÁ„o por meio de varios lotes.'
+insert dbawaittypes select 'UTIL_PAGE_ALLOC','Ocorre quando exames de log de transaÁ„o aguardam que memÛria esteja disponÌvel durante press„o da memÛria.'
+insert dbawaittypes select 'VIA_ACCEPT','Ocorre quando uma conex„o do provedor Virtual Interface Adapter (VIA) È concluÌda durante a inicializaÁ„o.'
+insert dbawaittypes select 'VIEW_DEFINITION_MUTEX','Ocorre durante a sincronizaÁ„o no acesso às definições de exibiÁ„o em cache.'
+insert dbawaittypes select 'WAIT_FOR_RESULTS','Ocorre ao esperar a ativaÁ„o de uma notificaÁ„o de consulta.'
+insert dbawaittypes select 'WAITFOR','Ocorre como resultado de uma instruÁ„o WAITFOR Transact-SQL. A duraÁ„o da espera È determinada pelos parâmetros da instruÁ„o. Es'
+insert dbawaittypes select 'WAITFOR_TASKSHUTDOWN','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'WAITSTAT_MUTEX','Ocorre durante a sincronizaÁ„o de acesso à coleÁ„o de estatÌsticas usadas para popular sys.dm_os_wait_stats.'
+insert dbawaittypes select 'WCC','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'WORKTBL_DROP','Ocorre ao pausar antes de tentar novamente, apÛs uma falh· no descarte de uma tabela de trabalho.'
+insert dbawaittypes select 'WRITE_COMPLETION','Ocorre quando uma operaÁ„o de gravaÁ„o esta em andamento.'
+insert dbawaittypes select 'WRITELOG','Ocorre ao aguardar que uma liberaÁ„o de log seja concluÌda. As operações comuns que causam liberações de log s„o pontos de verifica'
+insert dbawaittypes select 'XACT_OWN_TRANSACTION','Ocorre enquanto se espera a aquisiÁ„o da propriedade de uma transaÁ„o.'
+insert dbawaittypes select 'XACT_RECLAIM_SESSION','Ocorre enquanto se espera que o proprietario atual de uma sess„o libere a propriedade da sess„o.'
+insert dbawaittypes select 'XACTLOCKINFO','Ocorre durante a sincronizaÁ„o de acesso à lista de bloqueios para uma transaÁ„o. AlÈm da prÛpria transaÁ„o, a lista de bloqueios È ace'
+insert dbawaittypes select 'XACTWORKSPACE_MUTEX','Ocorre durante a sincronizaÁ„o de remoções de uma transaÁ„o, bem como do número de bloqueios de banco de dados entre os membro'
+insert dbawaittypes select 'XE_BUFFERMGR_ALLPROCESSED_EVENT','Ocorre quando buffers de sess„o do Extended Events s„o liberados para destinos. Essa espera ocorre em um thread em segundo plano.'
+insert dbawaittypes select 'XE_BUFFERMGR_FREEBUF_EVENT','Ocorre quando uma destas condições È verdadeira: Uma sess„o do Extended Events È configurada para nenhuma perda de evento. Ou As auditorias apresentam um atraso. Isso pode indicar um afunilamento de disco na unidade onde as auditorias s„o gravadas.'
+insert dbawaittypes select 'XE_DISPATCHER_CONFIG_SESSION_LIST','Ocorre quando uma sess„o do Extended Events que esta usando destinos assÌncronos È iniciada ou interrompida.'
+insert dbawaittypes select 'XE_DISPATCHER_JOIN','Ocorre quando um thread em segundo plano que È usado para sessões do Extended Events esta sendo encerrado.'
+insert dbawaittypes select 'XE_DISPATCHER_WAIT','Ocorre quando um thread em segundo plano que È usado para sessões do Extended Events esta esperando o processamento de buffers de evento.'
+insert dbawaittypes select 'XE_MODULEMGR_SYNC','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'XE_OLS_LOCK','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+insert dbawaittypes select 'XE_PACKAGE_LOCK_BACKOFF','Identificado apenas para fins informativos. N„o h· suporte. A compatibilidade futura n„o esta garantida.'
+
